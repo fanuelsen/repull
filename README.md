@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/logo.png" alt="Repull Logo" width="200"/>
+</div>
+
 # Repull
 
 A minimal, KISS-friendly Docker container auto-updater. Automatically updates running containers when new images are available, with support for Docker Compose.

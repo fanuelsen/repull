@@ -8,6 +8,8 @@ A minimal Docker container auto-updater. Automatically updates running container
 
 **Philosophy:** Keep It Simple, Stupid (KISS) - No web UI, no config files, no database.
 
+> ⚠️ **Disclaimer:** This project was vibe-coded into existence. I'm not a Go expert, I just Googled things until the compiler stopped yelling at me. If you find something cursed in the code, that's a feature, not a bug. Probably.
+
 ## Features
 
 - ✅ Opt-in only via `io.repull.enable=true` label

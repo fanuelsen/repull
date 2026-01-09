@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "platform": "forgejo",
+  "gitAuthor": "Renovate Bot <renovate@forgejo.sublog.org>",
+  "repositories": ["sublog.org/repull"],
+
+  "packageRules": [
+    {
+      "description": "Auto-merge minor and patch updates for Go dependencies",
+      "matchDatasources": ["go"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Require manual review for major updates",
+      "matchDatasources": ["go"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major-update"]
+    },
+    {
+      "description": "Group all Go dependency updates into single PR",
+      "matchDatasources": ["go"],
+      "groupName": "Go dependencies",
+      "groupSlug": "go-deps"
+    }
+  ],
+
+  "schedule": ["after 10pm every weekday"],
+  "timezone": "Europe/Oslo",
+
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 0,
+
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency Dashboard",
+  "dependencyDashboardAutoclose": true,
+
+  "commitMessagePrefix": "chore(deps):",
+  "commitMessageAction": "update",
+  "commitMessageExtra": "to {{newVersion}}",
+
+  "prTitle": "{{commitMessagePrefix}} {{commitMessageAction}} {{depName}} {{commitMessageExtra}}",
+  "prBodyColumns": ["Package", "Update", "Type", "Change"],
+  "prBodyNotes": ["{{#if (or (containsString updateType 'major') (containsString updateType 'minor'))}}:warning: This update includes breaking changes or new features. Please review carefully.{{/if}}"],
+
+  "assigneesFromCodeOwners": true,
+  "reviewersFromCodeOwners": true
+}

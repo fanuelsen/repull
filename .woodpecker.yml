@@ -1,0 +1,84 @@
+steps:
+  # Step 1: Run tests
+  test:
+    image: golang:alpine
+    commands:
+      - go test -v ./...
+    when:
+      event:
+        - pull_request
+        - tag
+
+  # Step 2: Security audit
+  security:
+    image: golang:alpine
+    commands:
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+      - govulncheck ./...
+    when:
+      event:
+        - pull_request
+        - tag
+
+  # Step 3: Build binary
+  build:
+    image: golang:alpine
+    commands:
+      - apk add --no-cache git
+      - go build -ldflags="-s -w" -trimpath -o repull ./cmd/repull
+      - ls -lh repull
+    when:
+      event:
+        - pull_request
+        - tag
+
+  # Step 4: Build and push Docker image on tag
+  docker-release:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: fanuelsen/repull
+      dockerfile: Dockerfile
+      platforms: linux/amd64
+      tags:
+        - latest
+        - ${CI_COMMIT_TAG}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      event:
+        - tag
+
+  # Step 5: Create Forgejo release with binary
+  forgejo-release:
+    image: woodpeckerci/plugin-release
+    settings:
+      base_url: ${CI_FORGE_URL}
+      api_key:
+        from_secret: forgejo_token
+      files:
+        - repull
+      title: "Repull ${CI_COMMIT_TAG}"
+      note: |
+        ## Repull ${CI_COMMIT_TAG}
+
+        ### Docker Image
+        ```bash
+        docker pull fanuelsen/repull:${CI_COMMIT_TAG}
+        ```
+
+        ### Binary
+        Download `repull` from assets below.
+
+        ### Install
+        ```bash
+        chmod +x repull
+        sudo mv repull /usr/local/bin/repull
+        ```
+      checksum:
+        - sha256
+      file_exists: skip
+    when:
+      event:
+        - tag

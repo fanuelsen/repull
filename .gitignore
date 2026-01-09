@@ -1,0 +1,45 @@
+# Binaries
+/repull
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+
+# Testing
+test-html/
+
+# Secrets
+.env.renovate
+
+# Claude-specific
+CLAUDE.md
+.claude/
+
+# Local-markdowns
+RENOVATE.md
+SECURITY.md
+CI_CD.md

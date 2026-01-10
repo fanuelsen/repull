@@ -4,24 +4,30 @@
 
 # Repull
 
-A minimal Docker container auto-updater. Automatically updates running containers when new images are available.
+A minimal Docker container auto-updater, a Watchtower alternative. Automatically updates running containers when new images are available.
 
 **Philosophy:** Keep It Simple, Stupid (KISS) - No web UI, no config files, no database.
 
+**Why did i build this when so many other projects exists?** 
+First of all, Watchtower was archived, so I needed a new way to automatically pull Docker image updates.Most of the other projects I found felt way more complex than what I wanted. I just wanted a small application that updates images to the latest version and sends a notification when it’s done.
+So I started this project. The philosophy is to keep the application as small as possible, to avoid introducing security issues, and to only use the libraries I actually need. Right now it only depends on the Go Docker library, and I want to keep it that way.
+I’m not a programming expert, so I also used help from Claude Code, Reddit, and Google to build this. I made this application mostly for fun. If you find a bug, please open an issue. If you want a new feature, you’ll probably want to fork it, as I don’t intend to make it more complex.
+I use Renovate and govulncheck to keep dependencies up to date and to check for vulnerable or compromised packages. This is automated in my homelab, and I’ll release new versions when updates are needed. If you're a Go expert and notice any improvements or logical errors, please open an issue. I’d really appreciate the help.
+
 ## Features
 
-- ✅ Opt-in only via `io.repull.enable=true` label
-- ✅ Docker Compose aware (groups services correctly)
-- ✅ Multi-network container support
-- ✅ Preserves all container config (volumes, ports, networks, env vars, etc.)
-- ✅ Interval or scheduled updates
-- ✅ Discord webhook notifications
-- ✅ Dry-run mode
-- ✅ Single static binary, no dependencies
+- Opt-in only via `io.repull.enable=true` label
+- Docker Compose aware (groups services correctly)
+- Multi-network container support
+- Preserves all container config (volumes, ports, networks, env vars, etc.)
+- Interval or scheduled updates
+- Discord webhook notifications
+- Dry-run mode
+- Single static binary, no dependencies
 
 ## Quick Start
 
-### Docker Compose (Recommended)
+### Docker Compose (as i run it in my homelab)
 
 ```yaml
 services:

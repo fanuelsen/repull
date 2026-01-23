@@ -27,30 +27,47 @@ I use Renovate and govulncheck to keep dependencies up to date and to check for 
 
 ## Quick Start
 
-### Docker Compose (as i run it in my homelab)
+### Docker Compose with Socket Proxy (recommended)
 
 ```yaml
 services:
   repull:
-    image: fanuelsen/repull:latest
-    # or: ghcr.io/fanuelsen/repull:latest
+    image: fanuelsen/repull
     container_name: repull
     restart: unless-stopped
+    environment:
+      - DOCKER_HOST=tcp://socket-proxy:2375
+      - REPULL_INTERVAL=300  # Check every 5 minutes
+      # - REPULL_SCHEDULE=23:00  # Or run daily at 11 PM
+      # - REPULL_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
+    networks:
+      - socket-proxy
+      # Add an external network if using Discord webhooks (needs internet)
+    labels:
+      - "io.repull.enable=true"  # Enable self-updates
+
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: socket-proxy
+    restart: unless-stopped
+    privileged: true
+    userns_mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      REPULL_INTERVAL: "300"  # Check every 5 minutes
-      # REPULL_SCHEDULE: "23:00"  # Or run daily at 11 PM
-      # REPULL_DISCORD_WEBHOOK: "https://discord.com/api/webhooks/..."
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+    networks:
+      - socket-proxy
 
-  # Your app with auto-update enabled
-  web:
-    image: nginx:latest
-    labels:
-      io.repull.enable: "true"  # Enable auto-updates
-    ports:
-      - "80:80"
+networks:
+  socket-proxy:
+    internal: true  # No internet access needed for pulling images
 ```
+
+**Note:** Repull doesn't need internet access for pulling images - the Docker daemon on the host does the actual pulling. Repull only needs internet if you're using Discord webhook notifications.
 
 ### Binary
 
@@ -122,6 +139,12 @@ repull --dry-run
 3. Groups by Docker Compose service
 4. Pulls latest image and compares digest
 5. Recreates container if digest changed (preserving all config)
+
+## Self-Updates
+
+Repull can update itself. When it detects a new image for its own container, it pulls the image, sends a notification (if configured), and exits cleanly. Docker's restart policy (`restart: unless-stopped`) then restarts the container with the new image.
+
+**Important:** Self-update detection relies on Docker's default hostname behavior (hostname = container ID). If you override the hostname with `--hostname` or `hostname:` in your compose file, self-update detection won't work and the container will fail to recreate itself.
 
 ## Docker Images
 

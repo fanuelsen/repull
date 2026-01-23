@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -75,6 +76,15 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				containerName = c.ID[:12]
 			}
 
+			// Self-update: exit and let Docker restart policy handle it
+			if isSelf(c.ID) {
+				log.Printf("[INFO] Self-update detected for %s, exiting to restart with new image", containerName)
+				if notifier != nil {
+					notifier.SendUpdate(groupKey, imageName, oldDigest, newDigest)
+				}
+				os.Exit(0)
+			}
+
 			log.Printf("[INFO] Recreating container %s", containerName)
 			if err := docker.RecreateContainer(ctx, cli, c); err != nil {
 				log.Printf("[ERROR] Failed to recreate container %s: %v", containerName, err)
@@ -102,4 +112,14 @@ func truncateDigest(digest string) string {
 		return digest[:19] + "..."
 	}
 	return digest
+}
+
+// isSelf checks if the given container ID belongs to this running instance.
+// Docker sets the hostname to the first 12 characters of the container ID by default.
+func isSelf(containerID string) bool {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(containerID, hostname)
 }

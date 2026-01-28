@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -10,6 +11,49 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
+
+// resolveNetworkMode checks if the network mode references another container
+// and resolves it to the current container ID. This handles the case where
+// Docker Compose translates "network_mode: service:name" to "container:<id>"
+// and that referenced container has since been recreated with a new ID.
+func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.NetworkMode) container.NetworkMode {
+	modeStr := string(mode)
+	if !strings.HasPrefix(modeStr, "container:") {
+		return mode
+	}
+
+	// Extract the container reference (could be ID or name)
+	ref := strings.TrimPrefix(modeStr, "container:")
+
+	// Try to inspect the container by the reference
+	inspect, err := cli.ContainerInspect(ctx, ref)
+	if err == nil {
+		// Container exists, use its current ID
+		return container.NetworkMode("container:" + inspect.ID)
+	}
+
+	// Container not found by that reference - it might be a stale ID
+	// Try to find a container by searching all containers for a matching name
+	// Docker names have a leading slash, so we check both with and without
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		// Can't list containers, return original mode and let it fail later
+		return mode
+	}
+
+	for _, c := range containers {
+		for _, name := range c.Names {
+			// Docker container names have a leading slash
+			cleanName := strings.TrimPrefix(name, "/")
+			if cleanName == ref || name == ref {
+				return container.NetworkMode("container:" + c.ID)
+			}
+		}
+	}
+
+	// Couldn't resolve, return original mode
+	return mode
+}
 
 // ListRunningContainers returns all currently running containers.
 func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container.InspectResponse, error) {
@@ -101,11 +145,14 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		config.Hostname = oldContainer.Config.Hostname
 	}
 
+	// Resolve network mode in case it references a container that was recreated
+	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode)
+
 	hostConfig := &container.HostConfig{
 		Binds:          oldContainer.HostConfig.Binds,
 		PortBindings:   portBindings,
 		RestartPolicy:  oldContainer.HostConfig.RestartPolicy,
-		NetworkMode:    oldContainer.HostConfig.NetworkMode,
+		NetworkMode:    networkMode,
 		CapAdd:         oldContainer.HostConfig.CapAdd,
 		CapDrop:        oldContainer.HostConfig.CapDrop,
 		DNS:            oldContainer.HostConfig.DNS,

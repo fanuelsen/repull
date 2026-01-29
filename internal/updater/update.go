@@ -76,12 +76,38 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				containerName = c.ID[:12]
 			}
 
-			// Self-update: exit and let Docker restart policy handle it
+			// Self-update: rename current container, create new one with same name, start it, then exit
 			if isSelf(c.ID) {
-				log.Printf("[INFO] Self-update detected for %s, exiting to restart with new image", containerName)
+				log.Printf("[INFO] Self-update detected for %s", containerName)
+
+				// Rename current container to allow new container to use the name
+				tempName := containerName + "-old-" + c.ID[:8]
+				if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
+					log.Printf("[ERROR] Failed to rename container for self-update: %v", err)
+					if notifier != nil {
+						notifier.SendError(groupKey, fmt.Sprintf("Self-update failed: %v", err))
+					}
+					return fmt.Errorf("failed to rename container for self-update: %w", err)
+				}
+				log.Printf("[INFO] Renamed %s to %s", containerName, tempName)
+
+				// Create and start new container with original name
+				if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
+					// Rollback: rename back to original
+					log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
+					cli.ContainerRename(ctx, c.ID, containerName)
+					if notifier != nil {
+						notifier.SendError(groupKey, fmt.Sprintf("Self-update failed: %v", err))
+					}
+					return fmt.Errorf("failed to create new container for self-update: %w", err)
+				}
+
+				log.Printf("[INFO] New container started, old container will stop on exit")
 				if notifier != nil {
 					notifier.SendUpdate(groupKey, imageName, oldDigest, newDigest)
 				}
+
+				// Exit - this stops the old (renamed) container, new one is already running
 				os.Exit(0)
 			}
 

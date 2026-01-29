@@ -211,3 +211,110 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 
 	return nil
 }
+
+// CreateAndStartContainer creates and starts a new container based on an existing container's config.
+// Used for self-update where we can't stop the old container before creating the new one.
+// The newName parameter specifies the name for the new container.
+func CreateAndStartContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse, newName string) error {
+	// Build port bindings
+	portBindings := nat.PortMap{}
+	exposedPorts := nat.PortSet{}
+	if oldContainer.HostConfig != nil && oldContainer.HostConfig.PortBindings != nil {
+		for port, bindings := range oldContainer.HostConfig.PortBindings {
+			portBindings[port] = bindings
+			exposedPorts[port] = struct{}{}
+		}
+	}
+
+	// Determine if we can set hostname
+	canSetHostname := true
+	if oldContainer.HostConfig != nil {
+		mode := string(oldContainer.HostConfig.NetworkMode)
+		if len(mode) >= 10 && mode[:10] == "container:" {
+			canSetHostname = false
+		} else if mode == "host" || mode == "none" {
+			canSetHostname = false
+		}
+	}
+
+	// Create new container config
+	config := &container.Config{
+		Image:        oldContainer.Config.Image,
+		Cmd:          oldContainer.Config.Cmd,
+		Entrypoint:   oldContainer.Config.Entrypoint,
+		Env:          oldContainer.Config.Env,
+		Labels:       oldContainer.Config.Labels,
+		ExposedPorts: exposedPorts,
+		WorkingDir:   oldContainer.Config.WorkingDir,
+		User:         oldContainer.Config.User,
+	}
+
+	if canSetHostname {
+		config.Hostname = oldContainer.Config.Hostname
+	}
+
+	// Resolve network mode in case it references a container that was recreated
+	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode)
+
+	hostConfig := &container.HostConfig{
+		Binds:          oldContainer.HostConfig.Binds,
+		PortBindings:   portBindings,
+		RestartPolicy:  oldContainer.HostConfig.RestartPolicy,
+		NetworkMode:    networkMode,
+		CapAdd:         oldContainer.HostConfig.CapAdd,
+		CapDrop:        oldContainer.HostConfig.CapDrop,
+		DNS:            oldContainer.HostConfig.DNS,
+		DNSSearch:      oldContainer.HostConfig.DNSSearch,
+		ExtraHosts:     oldContainer.HostConfig.ExtraHosts,
+		Privileged:     oldContainer.HostConfig.Privileged,
+		SecurityOpt:    oldContainer.HostConfig.SecurityOpt,
+		Resources:      oldContainer.HostConfig.Resources,
+		Tmpfs:          oldContainer.HostConfig.Tmpfs,
+		Sysctls:        oldContainer.HostConfig.Sysctls,
+		ShmSize:        oldContainer.HostConfig.ShmSize,
+		PidMode:        oldContainer.HostConfig.PidMode,
+		IpcMode:        oldContainer.HostConfig.IpcMode,
+		UTSMode:        oldContainer.HostConfig.UTSMode,
+		GroupAdd:       oldContainer.HostConfig.GroupAdd,
+		ReadonlyRootfs: oldContainer.HostConfig.ReadonlyRootfs,
+		LogConfig:      oldContainer.HostConfig.LogConfig,
+	}
+
+	// Network settings
+	networkConfig := &network.NetworkingConfig{}
+	var additionalNetworks []string
+	if oldContainer.NetworkSettings != nil && len(oldContainer.NetworkSettings.Networks) > 0 {
+		first := true
+		for netName, netConfig := range oldContainer.NetworkSettings.Networks {
+			if first {
+				networkConfig.EndpointsConfig = map[string]*network.EndpointSettings{
+					netName: netConfig,
+				}
+				first = false
+			} else {
+				additionalNetworks = append(additionalNetworks, netName)
+			}
+		}
+	}
+
+	// Create new container with the specified name
+	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkConfig, nil, newName)
+	if err != nil {
+		return fmt.Errorf("failed to create container: %w", err)
+	}
+
+	// Connect to additional networks before starting
+	for _, netName := range additionalNetworks {
+		endpointConfig := oldContainer.NetworkSettings.Networks[netName]
+		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
+			return fmt.Errorf("failed to connect container to network %s: %w", netName, err)
+		}
+	}
+
+	// Start the new container
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("failed to start container %s: %w", resp.ID, err)
+	}
+
+	return nil
+}

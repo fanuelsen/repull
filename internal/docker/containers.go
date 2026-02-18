@@ -12,11 +12,18 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
+// RecreatedContainers tracks containers that were recreated during an update cycle.
+// Maps old container ID to new container ID.
+type RecreatedContainers map[string]string
+
 // resolveNetworkMode checks if the network mode references another container
 // and resolves it to the current container ID. This handles the case where
 // Docker Compose translates "network_mode: service:name" to "container:<id>"
 // and that referenced container has since been recreated with a new ID.
-func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.NetworkMode) container.NetworkMode {
+//
+// The recreated parameter contains a mapping of old container IDs to new IDs
+// for containers that were recreated in the current update cycle.
+func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.NetworkMode, recreated RecreatedContainers) container.NetworkMode {
 	modeStr := string(mode)
 	if !strings.HasPrefix(modeStr, "container:") {
 		return mode
@@ -24,6 +31,19 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 
 	// Extract the container reference (could be ID or name)
 	ref := strings.TrimPrefix(modeStr, "container:")
+
+	// First, check if this references a container we just recreated
+	if recreated != nil {
+		if newID, ok := recreated[ref]; ok {
+			return container.NetworkMode("container:" + newID)
+		}
+		// Also check partial ID matches (Docker often uses short IDs)
+		for oldID, newID := range recreated {
+			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, oldID[:12]) {
+				return container.NetworkMode("container:" + newID)
+			}
+		}
+	}
 
 	// Try to inspect the container by the reference
 	inspect, err := cli.ContainerInspect(ctx, ref)
@@ -81,14 +101,18 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container
 }
 
 // RecreateContainer stops, removes, and recreates a container with the same configuration
-// but with a potentially updated image.
-func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse) error {
+// but with a potentially updated image. Returns the new container ID.
+//
+// The recreated parameter contains a mapping of old container IDs to new IDs
+// for containers that were recreated earlier in the current update cycle.
+// This is used to resolve stale network_mode references.
+func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse, recreated RecreatedContainers) (string, error) {
 	oldID := oldContainer.ID
 	oldName := oldContainer.Name
 
 	// Pull the latest image first
 	if err := PullImage(ctx, cli, oldContainer.Config.Image); err != nil {
-		return fmt.Errorf("failed to pull image %s: %w", oldContainer.Config.Image, err)
+		return "", fmt.Errorf("failed to pull image %s: %w", oldContainer.Config.Image, err)
 	}
 
 	// Stop the old container
@@ -97,12 +121,12 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		Timeout: &timeout,
 	}
 	if err := cli.ContainerStop(ctx, oldID, stopOptions); err != nil {
-		return fmt.Errorf("failed to stop container %s: %w", oldID, err)
+		return "", fmt.Errorf("failed to stop container %s: %w", oldID, err)
 	}
 
 	// Remove the old container
 	if err := cli.ContainerRemove(ctx, oldID, container.RemoveOptions{}); err != nil {
-		return fmt.Errorf("failed to remove container %s: %w", oldID, err)
+		return "", fmt.Errorf("failed to remove container %s: %w", oldID, err)
 	}
 
 	// Build port bindings
@@ -146,7 +170,7 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 	}
 
 	// Resolve network mode in case it references a container that was recreated
-	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode)
+	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode, recreated)
 
 	hostConfig := &container.HostConfig{
 		Binds:          oldContainer.HostConfig.Binds,
@@ -193,23 +217,23 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 	// Create new container
 	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkConfig, nil, oldName)
 	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
+		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
 	// Connect to additional networks before starting
 	for _, netName := range additionalNetworks {
 		endpointConfig := oldContainer.NetworkSettings.Networks[netName]
 		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
-			return fmt.Errorf("failed to connect container to network %s: %w", netName, err)
+			return "", fmt.Errorf("failed to connect container to network %s: %w", netName, err)
 		}
 	}
 
 	// Start the new container
 	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return fmt.Errorf("failed to start container %s: %w", resp.ID, err)
+		return "", fmt.Errorf("failed to start container %s: %w", resp.ID, err)
 	}
 
-	return nil
+	return resp.ID, nil
 }
 
 // CreateAndStartContainer creates and starts a new container based on an existing container's config.
@@ -254,7 +278,8 @@ func CreateAndStartContainer(ctx context.Context, cli *client.Client, oldContain
 	}
 
 	// Resolve network mode in case it references a container that was recreated
-	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode)
+	// For self-update, we don't have prior recreated containers to reference
+	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode, nil)
 
 	hostConfig := &container.HostConfig{
 		Binds:          oldContainer.HostConfig.Binds,

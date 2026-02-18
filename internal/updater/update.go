@@ -16,6 +16,11 @@ import (
 // UpdateGroups processes each group of containers and updates them if their image digest has changed.
 // It updates one group at a time (sequential, not parallel) for safety.
 func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]container.InspectResponse, dryRun bool, notifier *notify.Notifier) error {
+	// Track containers recreated during this update cycle.
+	// This is used to resolve stale network_mode references when containers
+	// use network_mode: service:X (which Docker stores as container:<id>).
+	recreated := make(docker.RecreatedContainers)
+
 	for groupKey, containers := range groups {
 		if len(containers) == 0 {
 			continue
@@ -112,13 +117,16 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 			}
 
 			log.Printf("[INFO] Recreating container %s", containerName)
-			if err := docker.RecreateContainer(ctx, cli, c); err != nil {
+			newID, err := docker.RecreateContainer(ctx, cli, c, recreated)
+			if err != nil {
 				log.Printf("[ERROR] Failed to recreate container %s: %v", containerName, err)
 				if notifier != nil {
 					notifier.SendError(groupKey, fmt.Sprintf("Failed to recreate container %s: %v", containerName, err))
 				}
 				return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
 			}
+			// Track the old->new ID mapping for resolving network_mode references
+			recreated[c.ID] = newID
 			log.Printf("[INFO] Successfully recreated %s", containerName)
 		}
 

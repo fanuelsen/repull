@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -75,6 +76,22 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 	return mode
 }
 
+// waitForContainerRemoval polls ContainerInspect until the container no longer exists.
+// Used to handle the race condition where Docker is already removing a container.
+func waitForContainerRemoval(ctx context.Context, cli *client.Client, containerID string) error {
+	for {
+		_, err := cli.ContainerInspect(ctx, containerID)
+		if err != nil {
+			return nil // container is gone
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 // ListRunningContainers returns all currently running containers.
 func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container.InspectResponse, error) {
 	filter := filters.NewArgs()
@@ -124,9 +141,17 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		return "", fmt.Errorf("failed to stop container %s: %w", oldID, err)
 	}
 
-	// Remove the old container
+	// Remove the old container.
+	// If removal is already in progress (race with Docker's restart policy or other cleanup),
+	// wait for it to complete rather than failing the whole update.
 	if err := cli.ContainerRemove(ctx, oldID, container.RemoveOptions{}); err != nil {
-		return "", fmt.Errorf("failed to remove container %s: %w", oldID, err)
+		if strings.Contains(err.Error(), "already in progress") {
+			if waitErr := waitForContainerRemoval(ctx, cli, oldID); waitErr != nil {
+				return "", fmt.Errorf("timed out waiting for container %s removal: %w", oldID, waitErr)
+			}
+		} else {
+			return "", fmt.Errorf("failed to remove container %s: %w", oldID, err)
+		}
 	}
 
 	// Build port bindings

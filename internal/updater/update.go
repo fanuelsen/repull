@@ -107,12 +107,21 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 					return fmt.Errorf("failed to create new container for self-update: %w", err)
 				}
 
-				log.Printf("[INFO] New container started, old container will stop on exit")
+				log.Printf("[INFO] New container started, stopping old container")
 				if notifier != nil {
 					notifier.SendUpdate(groupKey, imageName, oldDigest, newDigest)
 				}
 
-				// Exit - this stops the old (renamed) container, new one is already running
+				// Explicitly stop the old (renamed) container via the Docker API so that
+				// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
+				// by Docker as an unexpected exit, which triggers the restart policy.
+				// ContainerStop marks the container as explicitly stopped, preventing that.
+				// With timeout=0 Docker sends SIGKILL immediately; our process is killed
+				// before reaching os.Exit below.
+				stopTimeout := 0
+				if err := cli.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+					log.Printf("[WARN] Failed to stop old container, falling back to os.Exit: %v", err)
+				}
 				os.Exit(0)
 			}
 

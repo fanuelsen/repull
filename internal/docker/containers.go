@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -84,27 +83,6 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 	return mode
 }
 
-// waitForContainerRemoval polls ContainerInspect until the container no longer exists.
-// Used to handle the race condition where Docker is already removing a container.
-// A 60s deadline is applied on top of the caller's context to prevent hanging forever
-// if the Docker daemon stalls mid-removal.
-func waitForContainerRemoval(ctx context.Context, cli *client.Client, containerID string) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	for {
-		_, err := cli.ContainerInspect(ctx, containerID)
-		if err != nil {
-			return nil // container is gone
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for container %s to be removed", shortID(containerID))
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-
 // ListRunningContainers returns all currently running containers.
 func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container.InspectResponse, error) {
 	filter := filters.NewArgs()
@@ -130,8 +108,14 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container
 	return detailed, nil
 }
 
-// RecreateContainer stops, removes, and recreates a container with the same configuration
+// RecreateContainer stops and recreates a container with the same configuration
 // but with a potentially updated image. Returns the new container ID.
+//
+// The image must already be pulled by the caller (UpdateGroups handles this).
+//
+// Uses a rename-based approach to avoid data loss: the old container is stopped
+// and renamed (not removed) before creating the new one. If creation fails, the
+// old container is renamed back and restarted as a rollback.
 //
 // The recreated parameter contains a mapping of old container IDs to new IDs
 // for containers that were recreated earlier in the current update cycle.
@@ -139,11 +123,6 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container
 func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse, recreated RecreatedContainers) (string, error) {
 	oldID := oldContainer.ID
 	oldName := oldContainer.Name
-
-	// Pull the latest image first
-	if err := PullImage(ctx, cli, oldContainer.Config.Image); err != nil {
-		return "", fmt.Errorf("failed to pull image %s: %w", oldContainer.Config.Image, err)
-	}
 
 	// Stop the old container
 	timeout := 10
@@ -154,17 +133,13 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		return "", fmt.Errorf("failed to stop container %s: %w", oldID, err)
 	}
 
-	// Remove the old container.
-	// If removal is already in progress (race with Docker's restart policy or other cleanup),
-	// wait for it to complete rather than failing the whole update.
-	if err := cli.ContainerRemove(ctx, oldID, container.RemoveOptions{}); err != nil {
-		if strings.Contains(err.Error(), "already in progress") {
-			if waitErr := waitForContainerRemoval(ctx, cli, oldID); waitErr != nil {
-				return "", fmt.Errorf("timed out waiting for container %s removal: %w", oldID, waitErr)
-			}
-		} else {
-			return "", fmt.Errorf("failed to remove container %s: %w", oldID, err)
-		}
+	// Rename old container to free up the name for the new one.
+	// If creation fails we can rename it back and restart as rollback.
+	tempName := oldName + "-old-" + shortID(oldID)
+	if err := cli.ContainerRename(ctx, oldID, tempName); err != nil {
+		// Rename failed — try to restart the old container and bail
+		cli.ContainerStart(ctx, oldID, container.StartOptions{})
+		return "", fmt.Errorf("failed to rename container %s: %w", oldID, err)
 	}
 
 	// Build port bindings
@@ -252,9 +227,12 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		}
 	}
 
-	// Create new container
+	// Create new container with the original name
 	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkConfig, nil, oldName)
 	if err != nil {
+		// Rollback: rename old container back and restart it
+		cli.ContainerRename(ctx, oldID, oldName)
+		cli.ContainerStart(ctx, oldID, container.StartOptions{})
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
 
@@ -262,14 +240,25 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 	for _, netName := range additionalNetworks {
 		endpointConfig := oldContainer.NetworkSettings.Networks[netName]
 		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
+			// Rollback: remove the new container, rename old back, restart it
+			cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			cli.ContainerRename(ctx, oldID, oldName)
+			cli.ContainerStart(ctx, oldID, container.StartOptions{})
 			return "", fmt.Errorf("failed to connect container to network %s: %w", netName, err)
 		}
 	}
 
 	// Start the new container
 	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		// Rollback: remove the new container, rename old back, restart it
+		cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		cli.ContainerRename(ctx, oldID, oldName)
+		cli.ContainerStart(ctx, oldID, container.StartOptions{})
 		return "", fmt.Errorf("failed to start container %s: %w", resp.ID, err)
 	}
+
+	// New container is running — clean up old one (best-effort)
+	cli.ContainerRemove(ctx, oldID, container.RemoveOptions{})
 
 	return resp.ID, nil
 }

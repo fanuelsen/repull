@@ -5,6 +5,21 @@
 
   "packageRules": [
     {
+      "description": "Auto-merge minor and patch updates for Docker base images",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Require manual review for major Docker image updates",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major-update"]
+    },
+    {
       "description": "Auto-merge minor and patch updates for Go dependencies",
       "matchDatasources": ["go"],
       "matchUpdateTypes": ["minor", "patch"],

@@ -5,7 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 )
+
+// httpClient is used for all Discord webhook requests.
+// A 10s timeout prevents a hung Discord connection from stalling the update loop.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // Notifier sends notifications to Discord via webhook
 type Notifier struct {
@@ -14,11 +20,16 @@ type Notifier struct {
 
 // NewDiscordNotifier creates a new Discord notifier.
 // Returns nil if webhookURL is empty (disables notifications).
-func NewDiscordNotifier(webhookURL string) *Notifier {
+// Returns an error if the URL is not a valid Discord webhook.
+func NewDiscordNotifier(webhookURL string) (*Notifier, error) {
 	if webhookURL == "" {
-		return nil
+		return nil, nil
 	}
-	return &Notifier{webhookURL: webhookURL}
+	if !strings.HasPrefix(webhookURL, "https://discord.com/api/webhooks/") &&
+		!strings.HasPrefix(webhookURL, "https://discordapp.com/api/webhooks/") {
+		return nil, fmt.Errorf("invalid Discord webhook URL: must start with https://discord.com/api/webhooks/")
+	}
+	return &Notifier{webhookURL: webhookURL}, nil
 }
 
 // SendUpdate sends a notification about a successful container update
@@ -55,7 +66,7 @@ func (n *Notifier) send(message map[string]interface{}) error {
 		return err
 	}
 
-	resp, err := http.Post(n.webhookURL, "application/json", bytes.NewBuffer(data))
+	resp, err := httpClient.Post(n.webhookURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return err
 	}

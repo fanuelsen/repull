@@ -70,7 +70,10 @@ func main() {
 	log.Println("[INFO] Connected to Docker daemon")
 
 	// Create Discord notifier
-	notifier := notify.NewDiscordNotifier(*discordWebhook)
+	notifier, err := notify.NewDiscordNotifier(*discordWebhook)
+	if err != nil {
+		log.Fatalf("[ERROR] %v", err)
+	}
 	if notifier != nil {
 		log.Println("[INFO] Discord notifications enabled")
 	}

@@ -48,6 +48,11 @@ func main() {
 		log.Fatal("[ERROR] Cannot use --interval and --schedule together")
 	}
 
+	// Validate: interval must be at least 60 seconds to avoid hammering registries
+	if *interval > 0 && *interval < 60 {
+		log.Fatal("[ERROR] --interval must be at least 60 seconds")
+	}
+
 	log.Println("[INFO] Repull starting...")
 
 	// Set DOCKER_HOST if provided via flag

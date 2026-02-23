@@ -5,6 +5,27 @@
 
   "packageRules": [
     {
+      "description": "Auto-merge patch updates for Go toolchain version in go.mod",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "matchUpdateTypes": ["patch"],
+      "rangeStrategy": "bump",
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Require manual review for minor Go toolchain bumps (may affect compatibility)",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "matchUpdateTypes": ["minor"],
+      "rangeStrategy": "bump",
+      "automerge": false,
+      "labels": ["dependencies", "go-toolchain"]
+    },
+    {
       "description": "Auto-merge minor and patch updates for Docker base images",
       "matchDatasources": ["docker"],
       "matchUpdateTypes": ["minor", "patch"],

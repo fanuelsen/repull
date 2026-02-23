@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -26,7 +27,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 			continue
 		}
 
-		log.Printf("[INFO] Checking %s (%d container(s))", groupKey, len(containers))
+		log.Printf("[INFO] Checking %s (%d container(s))", sanitize(groupKey), len(containers))
 
 		// Get image name from first container (all containers in a group share the same image)
 		imageName := containers[0].Config.Image
@@ -34,17 +35,17 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		// Get current digest before pulling
 		oldDigest, err := docker.GetImageDigest(ctx, cli, imageName)
 		if err != nil {
-			log.Printf("[WARN] Failed to get current digest for %s: %v", imageName, err)
+			log.Printf("[WARN] Failed to get current digest for %s: %v", sanitize(imageName), err)
 			// Continue with empty digest - will trigger update after pull
 			oldDigest = ""
 		}
 
 		// Pull latest image
-		log.Printf("[INFO] Pulling image %s", imageName)
+		log.Printf("[INFO] Pulling image %s", sanitize(imageName))
 		if err := docker.PullImage(ctx, cli, imageName); err != nil {
-			log.Printf("[ERROR] Failed to pull image %s: %v", imageName, err)
+			log.Printf("[ERROR] Failed to pull image %s: %v", sanitize(imageName), err)
 			if notifier != nil {
-				notifier.SendError(groupKey, fmt.Sprintf("Failed to pull image %s: %v", imageName, err))
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s", sanitize(imageName)))
 			}
 			return fmt.Errorf("failed to pull image %s: %w", imageName, err)
 		}
@@ -52,16 +53,16 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		// Get new digest after pulling
 		newDigest, err := docker.GetImageDigest(ctx, cli, imageName)
 		if err != nil {
-			log.Printf("[ERROR] Failed to get new digest for %s: %v", imageName, err)
+			log.Printf("[ERROR] Failed to get new digest for %s: %v", sanitize(imageName), err)
 			if notifier != nil {
-				notifier.SendError(groupKey, fmt.Sprintf("Failed to get digest for %s: %v", imageName, err))
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to get digest for %s", sanitize(imageName)))
 			}
 			return fmt.Errorf("failed to get digest for %s: %w", imageName, err)
 		}
 
 		// Check if digest changed
 		if !docker.HasDigestChanged(oldDigest, newDigest) {
-			log.Printf("[INFO] Image digest unchanged, skipping %s", groupKey)
+			log.Printf("[INFO] Image digest unchanged, skipping %s", sanitize(groupKey))
 			continue
 		}
 
@@ -69,7 +70,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		log.Printf("[INFO] Image digest changed: %s -> %s", truncateDigest(oldDigest), truncateDigest(newDigest))
 
 		if dryRun {
-			log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", groupKey, len(containers))
+			log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", sanitize(groupKey), len(containers))
 			continue
 		}
 
@@ -78,23 +79,37 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		for _, c := range containers {
 			containerName := strings.TrimPrefix(c.Name, "/")
 			if containerName == "" {
-				containerName = c.ID[:12]
+				if len(c.ID) > 12 {
+					containerName = c.ID[:12]
+				} else {
+					containerName = c.ID
+				}
 			}
 
-			// Self-update: rename current container, create new one with same name, start it, then exit
+			// Self-update: only proceed if io.repull.self-update=true is set on this container.
+			// Self-update is opt-in because it implicitly trusts the registry to deliver a safe image.
 			if isSelf(c.ID) {
-				log.Printf("[INFO] Self-update detected for %s", containerName)
+				if c.Config == nil || c.Config.Labels[SelfUpdateLabel] != "true" {
+					log.Printf("[INFO] Skipping self-update for %s (set label %s=true to enable)", sanitize(containerName), SelfUpdateLabel)
+					continue
+				}
+
+				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
 
 				// Rename current container to allow new container to use the name
-				tempName := containerName + "-old-" + c.ID[:8]
+				suffix := c.ID
+				if len(c.ID) > 8 {
+					suffix = c.ID[:8]
+				}
+				tempName := containerName + "-old-" + suffix
 				if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
 					log.Printf("[ERROR] Failed to rename container for self-update: %v", err)
 					if notifier != nil {
-						notifier.SendError(groupKey, fmt.Sprintf("Self-update failed: %v", err))
+						notifier.SendError(sanitize(groupKey), "Self-update failed: rename error")
 					}
 					return fmt.Errorf("failed to rename container for self-update: %w", err)
 				}
-				log.Printf("[INFO] Renamed %s to %s", containerName, tempName)
+				log.Printf("[INFO] Renamed %s to %s", sanitize(containerName), sanitize(tempName))
 
 				// Create and start new container with original name
 				if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
@@ -102,14 +117,14 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 					log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
 					cli.ContainerRename(ctx, c.ID, containerName)
 					if notifier != nil {
-						notifier.SendError(groupKey, fmt.Sprintf("Self-update failed: %v", err))
+						notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
 					}
 					return fmt.Errorf("failed to create new container for self-update: %w", err)
 				}
 
 				log.Printf("[INFO] New container started, stopping old container")
 				if notifier != nil {
-					notifier.SendUpdate(groupKey, imageName, oldDigest, newDigest)
+					notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldDigest, newDigest)
 				}
 
 				// Explicitly stop the old (renamed) container via the Docker API so that
@@ -125,23 +140,23 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				os.Exit(0)
 			}
 
-			log.Printf("[INFO] Recreating container %s", containerName)
+			log.Printf("[INFO] Recreating container %s", sanitize(containerName))
 			newID, err := docker.RecreateContainer(ctx, cli, c, recreated)
 			if err != nil {
-				log.Printf("[ERROR] Failed to recreate container %s: %v", containerName, err)
+				log.Printf("[ERROR] Failed to recreate container %s: %v", sanitize(containerName), err)
 				if notifier != nil {
-					notifier.SendError(groupKey, fmt.Sprintf("Failed to recreate container %s: %v", containerName, err))
+					notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s", sanitize(containerName)))
 				}
 				return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
 			}
 			// Track the old->new ID mapping for resolving network_mode references
 			recreated[c.ID] = newID
-			log.Printf("[INFO] Successfully recreated %s", containerName)
+			log.Printf("[INFO] Successfully recreated %s", sanitize(containerName))
 		}
 
 		// Send success notification after all containers in group are recreated
 		if notifier != nil {
-			notifier.SendUpdate(groupKey, imageName, oldDigest, newDigest)
+			notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldDigest, newDigest)
 		}
 	}
 
@@ -157,12 +172,77 @@ func truncateDigest(digest string) string {
 	return digest
 }
 
+// sanitize replaces control characters (newlines, ANSI escapes, etc.) in strings
+// derived from external sources — container names, image names, compose labels —
+// before they are written to logs or sent as notifications. This prevents log
+// injection via crafted container names.
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return '·'
+		}
+		return r
+	}, s)
+}
+
+var (
+	ownID     string
+	ownIDOnce sync.Once
+)
+
 // isSelf checks if the given container ID belongs to this running instance.
-// Docker sets the hostname to the first 12 characters of the container ID by default.
+// It reads /proc/self/cgroup to get the real container ID, which works even
+// when a custom hostname is set. Falls back to hostname prefix matching if
+// the cgroup file is not available (e.g. running outside a container).
 func isSelf(containerID string) bool {
-	hostname, err := os.Hostname()
-	if err != nil {
+	ownIDOnce.Do(func() { ownID = detectOwnContainerID() })
+	if len(ownID) == 64 {
+		return containerID == ownID
+	}
+	// Hostname fallback: Docker defaults hostname to first 12 chars of container ID
+	return strings.HasPrefix(containerID, ownID)
+}
+
+// detectOwnContainerID reads /proc/self/cgroup to find the current container ID.
+// Docker embeds the 64-char container ID in the cgroup path in two common formats:
+//   - cgroupsv1:  /docker/<id>
+//   - cgroupsv2 with systemd:  /system.slice/docker-<id>.scope
+//
+// Falls back to os.Hostname() if no container ID is found.
+func detectOwnContainerID() string {
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.SplitN(line, ":", 3)
+			if len(fields) != 3 {
+				continue
+			}
+			// Take the last segment of the cgroup path
+			path := fields[2]
+			segment := path
+			if i := strings.LastIndexByte(path, '/'); i >= 0 {
+				segment = path[i+1:]
+			}
+			// Strip systemd scope wrapper: docker-<id>.scope
+			segment = strings.TrimSuffix(segment, ".scope")
+			segment = strings.TrimPrefix(segment, "docker-")
+			if isContainerID(segment) {
+				return segment
+			}
+		}
+	}
+	hostname, _ := os.Hostname()
+	return hostname
+}
+
+// isContainerID returns true if s is a 64-character lowercase hex string.
+func isContainerID(s string) bool {
+	if len(s) != 64 {
 		return false
 	}
-	return strings.HasPrefix(containerID, hostname)
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

@@ -46,10 +46,17 @@ func (n *Notifier) SendUpdate(service, image, oldDigest, newDigest string) error
 	return n.send(message)
 }
 
-// SendError sends a notification about an update failure
+// SendError sends a notification about an update failure.
+// Error messages are truncated to avoid leaking sensitive data (e.g. registry
+// credentials that may appear in Docker API error strings) to Discord.
 func (n *Notifier) SendError(service, errorMsg string) error {
 	if n == nil {
 		return nil
+	}
+
+	const maxLen = 200
+	if len(errorMsg) > maxLen {
+		errorMsg = errorMsg[:maxLen] + "..."
 	}
 
 	message := map[string]interface{}{

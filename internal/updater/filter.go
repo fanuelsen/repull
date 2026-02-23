@@ -7,6 +7,11 @@ import (
 const (
 	// EnableLabel is the label that must be set to "true" for a container to be auto-updated
 	EnableLabel = "io.repull.enable"
+
+	// SelfUpdateLabel is the label that must be set to "true" on repull's own container
+	// to allow it to update itself. Self-update is disabled by default because it implicitly
+	// trusts the registry — opt in explicitly to accept that risk.
+	SelfUpdateLabel = "io.repull.self-update"
 )
 
 // FilterOptedInContainers returns only containers that have the io.repull.enable=true label.

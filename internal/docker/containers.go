@@ -17,6 +17,14 @@ import (
 // Maps old container ID to new container ID.
 type RecreatedContainers map[string]string
 
+// shortID returns the first 12 characters of a container ID, or the full ID if shorter.
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
 // resolveNetworkMode checks if the network mode references another container
 // and resolves it to the current container ID. This handles the case where
 // Docker Compose translates "network_mode: service:name" to "container:<id>"
@@ -40,7 +48,7 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 		}
 		// Also check partial ID matches (Docker often uses short IDs)
 		for oldID, newID := range recreated {
-			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, oldID[:12]) {
+			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, shortID(oldID)) {
 				return container.NetworkMode("container:" + newID)
 			}
 		}
@@ -78,7 +86,12 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 
 // waitForContainerRemoval polls ContainerInspect until the container no longer exists.
 // Used to handle the race condition where Docker is already removing a container.
+// A 60s deadline is applied on top of the caller's context to prevent hanging forever
+// if the Docker daemon stalls mid-removal.
 func waitForContainerRemoval(ctx context.Context, cli *client.Client, containerID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
 	for {
 		_, err := cli.ContainerInspect(ctx, containerID)
 		if err != nil {
@@ -86,7 +99,7 @@ func waitForContainerRemoval(ctx context.Context, cli *client.Client, containerI
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("timed out waiting for container %s to be removed", shortID(containerID))
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

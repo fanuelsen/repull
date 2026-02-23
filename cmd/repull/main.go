@@ -100,7 +100,10 @@ func main() {
 
 // runOnce performs a single update check and execution.
 func runOnce(cli *client.Client, notifier *notify.Notifier) error {
-	ctx := context.Background()
+	// 10-minute deadline covers the full update cycle. Prevents a stalled Docker
+	// daemon or hung image pull from blocking the loop indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
 	// List running containers
 	containers, err := docker.ListRunningContainers(ctx, cli)

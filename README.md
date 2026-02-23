@@ -44,7 +44,8 @@ services:
       - socket-proxy
       # Add an external network if using Discord webhooks (needs internet)
     labels:
-      - "io.repull.enable=true"  # Enable self-updates
+      - "io.repull.enable=true"
+      - "io.repull.self-update=true"  # Optional: allow repull to update itself
 
   socket-proxy:
     image: tecnativa/docker-socket-proxy
@@ -101,6 +102,11 @@ services:
       io.repull.enable: "true"
 ```
 
+| Label | Value | Description |
+|-------|-------|-------------|
+| `io.repull.enable` | `true` | Opt this container in to auto-updates |
+| `io.repull.self-update` | `true` | Allow repull to update its own container (see below) |
+
 ### 2. Run Repull
 
 ```bash
@@ -132,6 +138,8 @@ repull --dry-run
 
 **Note:** `--interval` and `--schedule` are mutually exclusive.
 
+**Note:** Prefer `REPULL_DISCORD_WEBHOOK` over `--discord-webhook` for the webhook URL. CLI flags are visible to other processes via `/proc/<pid>/cmdline`, whereas environment variables are not.
+
 ## How It Works
 
 1. Lists all running containers
@@ -142,9 +150,24 @@ repull --dry-run
 
 ## Self-Updates
 
-Repull can update itself. When it detects a new image for its own container, it pulls the image, sends a notification (if configured), and exits cleanly. Docker's restart policy (`restart: unless-stopped`) then restarts the container with the new image.
+Self-update is **disabled by default**. When repull detects a new image for its own container it will skip it unless `io.repull.self-update=true` is set. This is intentional — self-update means repull will pull a new image from the registry and run it with full Docker socket access, which requires explicitly trusting the registry and the image publisher.
 
-**Important:** Self-update detection relies on Docker's default hostname behavior (hostname = container ID). If you override the hostname with `--hostname` or `hostname:` in your compose file, self-update detection won't work and the container will fail to recreate itself.
+To enable self-update, add both labels to repull's own container:
+
+```yaml
+services:
+  repull:
+    image: fanuelsen/repull
+    labels:
+      - "io.repull.enable=true"
+      - "io.repull.self-update=true"
+```
+
+Without `io.repull.self-update=true`, repull logs a notice and skips itself:
+
+```
+[INFO] Skipping self-update for repull (set label io.repull.self-update=true to enable)
+```
 
 ## Docker Images
 

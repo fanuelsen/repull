@@ -86,14 +86,9 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				}
 			}
 
-			// Self-update: only proceed if io.repull.self-update=true is set on this container.
-			// Self-update is opt-in because it implicitly trusts the registry to deliver a safe image.
+			// Self-update: container already passed the io.repull.enable=true filter,
+			// so the user has opted in. Use the rename-based self-update flow.
 			if isSelf(c.ID) {
-				if c.Config == nil || c.Config.Labels[SelfUpdateLabel] != "true" {
-					log.Printf("[INFO] Skipping self-update for %s (set label %s=true to enable)", sanitize(containerName), SelfUpdateLabel)
-					continue
-				}
-
 				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
 
 				// Rename current container to allow new container to use the name

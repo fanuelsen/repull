@@ -5,12 +5,18 @@
 
   "packageRules": [
     {
+      "description": "Use bump strategy for Go toolchain version in go.mod",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "rangeStrategy": "bump"
+    },
+    {
       "description": "Auto-merge patch updates for Go toolchain version in go.mod",
       "matchManagers": ["gomod"],
       "matchDepNames": ["go"],
       "matchDepTypes": ["golang"],
       "matchUpdateTypes": ["patch"],
-      "rangeStrategy": "bump",
       "automerge": true,
       "automergeType": "pr",
       "automergeStrategy": "squash"
@@ -21,7 +27,6 @@
       "matchDepNames": ["go"],
       "matchDepTypes": ["golang"],
       "matchUpdateTypes": ["minor"],
-      "rangeStrategy": "bump",
       "automerge": false,
       "labels": ["dependencies", "go-toolchain"]
     },

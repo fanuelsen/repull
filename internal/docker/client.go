@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"time"
 
 	"github.com/docker/docker/client"
 )
@@ -14,8 +15,10 @@ func NewClient() (*client.Client, error) {
 		return nil, err
 	}
 
-	// Verify connection
-	ctx := context.Background()
+	// Verify connection with a timeout to avoid blocking indefinitely
+	// on an unresponsive Docker daemon.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	_, err = cli.Ping(ctx)
 	if err != nil {
 		return nil, err

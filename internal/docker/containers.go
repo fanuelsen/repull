@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -108,6 +109,136 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container
 	return detailed, nil
 }
 
+// containerConfigs holds the configs needed to create a new container.
+type containerConfigs struct {
+	config        *container.Config
+	hostConfig    *container.HostConfig
+	networkConfig *network.NetworkingConfig
+	// additionalNetworks are connected after creation (Docker only allows one at create time).
+	additionalNetworks []string
+}
+
+// buildContainerConfigs extracts the container, host, and network configs from
+// an existing container's inspect response. This is used by both RecreateContainer
+// and CreateAndStartContainer to avoid duplicating the config-building logic.
+func buildContainerConfigs(ctx context.Context, cli *client.Client, old container.InspectResponse, recreated RecreatedContainers) containerConfigs {
+	// Build port bindings
+	portBindings := nat.PortMap{}
+	exposedPorts := nat.PortSet{}
+	if old.HostConfig != nil && old.HostConfig.PortBindings != nil {
+		for port, bindings := range old.HostConfig.PortBindings {
+			portBindings[port] = bindings
+			exposedPorts[port] = struct{}{}
+		}
+	}
+
+	// Determine if we can set hostname
+	// Hostname conflicts with network modes: container:, host, none
+	canSetHostname := true
+	if old.HostConfig != nil {
+		mode := string(old.HostConfig.NetworkMode)
+		if len(mode) >= 10 && mode[:10] == "container:" {
+			canSetHostname = false
+		} else if mode == "host" || mode == "none" {
+			canSetHostname = false
+		}
+	}
+
+	config := &container.Config{
+		Image:        old.Config.Image,
+		Cmd:          old.Config.Cmd,
+		Entrypoint:   old.Config.Entrypoint,
+		Env:          old.Config.Env,
+		Labels:       old.Config.Labels,
+		ExposedPorts: exposedPorts,
+		WorkingDir:   old.Config.WorkingDir,
+		User:         old.Config.User,
+	}
+
+	if canSetHostname {
+		config.Hostname = old.Config.Hostname
+	}
+
+	// Resolve network mode in case it references a container that was recreated
+	networkMode := resolveNetworkMode(ctx, cli, old.HostConfig.NetworkMode, recreated)
+
+	hostConfig := &container.HostConfig{
+		Binds:          old.HostConfig.Binds,
+		PortBindings:   portBindings,
+		RestartPolicy:  old.HostConfig.RestartPolicy,
+		NetworkMode:    networkMode,
+		CapAdd:         old.HostConfig.CapAdd,
+		CapDrop:        old.HostConfig.CapDrop,
+		DNS:            old.HostConfig.DNS,
+		DNSSearch:      old.HostConfig.DNSSearch,
+		ExtraHosts:     old.HostConfig.ExtraHosts,
+		Privileged:     old.HostConfig.Privileged,
+		SecurityOpt:    old.HostConfig.SecurityOpt,
+		Resources:      old.HostConfig.Resources,
+		Tmpfs:          old.HostConfig.Tmpfs,
+		Sysctls:        old.HostConfig.Sysctls,
+		ShmSize:        old.HostConfig.ShmSize,
+		PidMode:        old.HostConfig.PidMode,
+		IpcMode:        old.HostConfig.IpcMode,
+		UTSMode:        old.HostConfig.UTSMode,
+		GroupAdd:       old.HostConfig.GroupAdd,
+		ReadonlyRootfs: old.HostConfig.ReadonlyRootfs,
+		LogConfig:      old.HostConfig.LogConfig,
+	}
+
+	// Network settings - Docker only allows one network at creation time.
+	// We connect to the first network during creation, then add others after.
+	// Sort network names for deterministic ordering across runs.
+	netConfig := &network.NetworkingConfig{}
+	var additional []string
+	if old.NetworkSettings != nil && len(old.NetworkSettings.Networks) > 0 {
+		names := make([]string, 0, len(old.NetworkSettings.Networks))
+		for name := range old.NetworkSettings.Networks {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		netConfig.EndpointsConfig = map[string]*network.EndpointSettings{
+			names[0]: old.NetworkSettings.Networks[names[0]],
+		}
+		additional = names[1:]
+	}
+
+	return containerConfigs{
+		config:             config,
+		hostConfig:         hostConfig,
+		networkConfig:      netConfig,
+		additionalNetworks: additional,
+	}
+}
+
+// createAndConnectNetworks creates a container, connects it to additional networks,
+// and starts it. On any failure the partially-created container is removed.
+// Returns the new container ID.
+func createAndConnectNetworks(ctx context.Context, cli *client.Client, old container.InspectResponse, cc containerConfigs, name string) (string, error) {
+	resp, err := cli.ContainerCreate(ctx, cc.config, cc.hostConfig, cc.networkConfig, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("failed to create container: %w", err)
+	}
+
+	// Connect to additional networks before starting
+	for _, netName := range cc.additionalNetworks {
+		endpointConfig := old.NetworkSettings.Networks[netName]
+		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
+			cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			return "", fmt.Errorf("failed to connect container to network %s: %w", netName, err)
+		}
+	}
+
+	// Start the new container
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("failed to start container %s: %w", resp.ID, err)
+	}
+
+	return resp.ID, nil
+}
+
 // RecreateContainer stops and recreates a container with the same configuration
 // but with a potentially updated image. Returns the new container ID.
 //
@@ -142,231 +273,28 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		return "", fmt.Errorf("failed to rename container %s: %w", oldID, err)
 	}
 
-	// Build port bindings
-	portBindings := nat.PortMap{}
-	exposedPorts := nat.PortSet{}
-	if oldContainer.HostConfig != nil && oldContainer.HostConfig.PortBindings != nil {
-		for port, bindings := range oldContainer.HostConfig.PortBindings {
-			portBindings[port] = bindings
-			exposedPorts[port] = struct{}{}
-		}
-	}
+	cc := buildContainerConfigs(ctx, cli, oldContainer, recreated)
 
-	// Determine if we can set hostname
-	// Hostname conflicts with network modes: container:, host, none
-	canSetHostname := true
-	if oldContainer.HostConfig != nil {
-		mode := string(oldContainer.HostConfig.NetworkMode)
-		// Check if using container:, host, or none network mode
-		if len(mode) >= 10 && mode[:10] == "container:" {
-			canSetHostname = false
-		} else if mode == "host" || mode == "none" {
-			canSetHostname = false
-		}
-	}
-
-	// Create new container with same config
-	config := &container.Config{
-		Image:        oldContainer.Config.Image,
-		Cmd:          oldContainer.Config.Cmd,
-		Entrypoint:   oldContainer.Config.Entrypoint,
-		Env:          oldContainer.Config.Env,
-		Labels:       oldContainer.Config.Labels,
-		ExposedPorts: exposedPorts,
-		WorkingDir:   oldContainer.Config.WorkingDir,
-		User:         oldContainer.Config.User,
-	}
-
-	// Only set hostname if network mode allows it
-	if canSetHostname {
-		config.Hostname = oldContainer.Config.Hostname
-	}
-
-	// Resolve network mode in case it references a container that was recreated
-	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode, recreated)
-
-	hostConfig := &container.HostConfig{
-		Binds:          oldContainer.HostConfig.Binds,
-		PortBindings:   portBindings,
-		RestartPolicy:  oldContainer.HostConfig.RestartPolicy,
-		NetworkMode:    networkMode,
-		CapAdd:         oldContainer.HostConfig.CapAdd,
-		CapDrop:        oldContainer.HostConfig.CapDrop,
-		DNS:            oldContainer.HostConfig.DNS,
-		DNSSearch:      oldContainer.HostConfig.DNSSearch,
-		ExtraHosts:     oldContainer.HostConfig.ExtraHosts,
-		Privileged:     oldContainer.HostConfig.Privileged,
-		SecurityOpt:    oldContainer.HostConfig.SecurityOpt,
-		Resources:      oldContainer.HostConfig.Resources,
-		Tmpfs:          oldContainer.HostConfig.Tmpfs,
-		Sysctls:        oldContainer.HostConfig.Sysctls,
-		ShmSize:        oldContainer.HostConfig.ShmSize,
-		PidMode:        oldContainer.HostConfig.PidMode,
-		IpcMode:        oldContainer.HostConfig.IpcMode,
-		UTSMode:        oldContainer.HostConfig.UTSMode,
-		GroupAdd:       oldContainer.HostConfig.GroupAdd,
-		ReadonlyRootfs: oldContainer.HostConfig.ReadonlyRootfs,
-		LogConfig:      oldContainer.HostConfig.LogConfig,
-	}
-
-	// Network settings - Docker only allows one network at creation time.
-	// We connect to the first network during creation, then add others after.
-	networkConfig := &network.NetworkingConfig{}
-	var additionalNetworks []string
-	if oldContainer.NetworkSettings != nil && len(oldContainer.NetworkSettings.Networks) > 0 {
-		first := true
-		for netName, netConfig := range oldContainer.NetworkSettings.Networks {
-			if first {
-				networkConfig.EndpointsConfig = map[string]*network.EndpointSettings{
-					netName: netConfig,
-				}
-				first = false
-			} else {
-				additionalNetworks = append(additionalNetworks, netName)
-			}
-		}
-	}
-
-	// Create new container with the original name
-	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkConfig, nil, oldName)
+	newID, err := createAndConnectNetworks(ctx, cli, oldContainer, cc, oldName)
 	if err != nil {
 		// Rollback: rename old container back and restart it
 		cli.ContainerRename(ctx, oldID, oldName)
 		cli.ContainerStart(ctx, oldID, container.StartOptions{})
-		return "", fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Connect to additional networks before starting
-	for _, netName := range additionalNetworks {
-		endpointConfig := oldContainer.NetworkSettings.Networks[netName]
-		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
-			// Rollback: remove the new container, rename old back, restart it
-			cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-			cli.ContainerRename(ctx, oldID, oldName)
-			cli.ContainerStart(ctx, oldID, container.StartOptions{})
-			return "", fmt.Errorf("failed to connect container to network %s: %w", netName, err)
-		}
-	}
-
-	// Start the new container
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		// Rollback: remove the new container, rename old back, restart it
-		cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		cli.ContainerRename(ctx, oldID, oldName)
-		cli.ContainerStart(ctx, oldID, container.StartOptions{})
-		return "", fmt.Errorf("failed to start container %s: %w", resp.ID, err)
+		return "", err
 	}
 
 	// New container is running — clean up old one (best-effort)
 	cli.ContainerRemove(ctx, oldID, container.RemoveOptions{})
 
-	return resp.ID, nil
+	return newID, nil
 }
 
 // CreateAndStartContainer creates and starts a new container based on an existing container's config.
 // Used for self-update where we can't stop the old container before creating the new one.
 // The newName parameter specifies the name for the new container.
 func CreateAndStartContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse, newName string) error {
-	// Build port bindings
-	portBindings := nat.PortMap{}
-	exposedPorts := nat.PortSet{}
-	if oldContainer.HostConfig != nil && oldContainer.HostConfig.PortBindings != nil {
-		for port, bindings := range oldContainer.HostConfig.PortBindings {
-			portBindings[port] = bindings
-			exposedPorts[port] = struct{}{}
-		}
-	}
+	cc := buildContainerConfigs(ctx, cli, oldContainer, nil)
 
-	// Determine if we can set hostname
-	canSetHostname := true
-	if oldContainer.HostConfig != nil {
-		mode := string(oldContainer.HostConfig.NetworkMode)
-		if len(mode) >= 10 && mode[:10] == "container:" {
-			canSetHostname = false
-		} else if mode == "host" || mode == "none" {
-			canSetHostname = false
-		}
-	}
-
-	// Create new container config
-	config := &container.Config{
-		Image:        oldContainer.Config.Image,
-		Cmd:          oldContainer.Config.Cmd,
-		Entrypoint:   oldContainer.Config.Entrypoint,
-		Env:          oldContainer.Config.Env,
-		Labels:       oldContainer.Config.Labels,
-		ExposedPorts: exposedPorts,
-		WorkingDir:   oldContainer.Config.WorkingDir,
-		User:         oldContainer.Config.User,
-	}
-
-	if canSetHostname {
-		config.Hostname = oldContainer.Config.Hostname
-	}
-
-	// Resolve network mode in case it references a container that was recreated
-	// For self-update, we don't have prior recreated containers to reference
-	networkMode := resolveNetworkMode(ctx, cli, oldContainer.HostConfig.NetworkMode, nil)
-
-	hostConfig := &container.HostConfig{
-		Binds:          oldContainer.HostConfig.Binds,
-		PortBindings:   portBindings,
-		RestartPolicy:  oldContainer.HostConfig.RestartPolicy,
-		NetworkMode:    networkMode,
-		CapAdd:         oldContainer.HostConfig.CapAdd,
-		CapDrop:        oldContainer.HostConfig.CapDrop,
-		DNS:            oldContainer.HostConfig.DNS,
-		DNSSearch:      oldContainer.HostConfig.DNSSearch,
-		ExtraHosts:     oldContainer.HostConfig.ExtraHosts,
-		Privileged:     oldContainer.HostConfig.Privileged,
-		SecurityOpt:    oldContainer.HostConfig.SecurityOpt,
-		Resources:      oldContainer.HostConfig.Resources,
-		Tmpfs:          oldContainer.HostConfig.Tmpfs,
-		Sysctls:        oldContainer.HostConfig.Sysctls,
-		ShmSize:        oldContainer.HostConfig.ShmSize,
-		PidMode:        oldContainer.HostConfig.PidMode,
-		IpcMode:        oldContainer.HostConfig.IpcMode,
-		UTSMode:        oldContainer.HostConfig.UTSMode,
-		GroupAdd:       oldContainer.HostConfig.GroupAdd,
-		ReadonlyRootfs: oldContainer.HostConfig.ReadonlyRootfs,
-		LogConfig:      oldContainer.HostConfig.LogConfig,
-	}
-
-	// Network settings
-	networkConfig := &network.NetworkingConfig{}
-	var additionalNetworks []string
-	if oldContainer.NetworkSettings != nil && len(oldContainer.NetworkSettings.Networks) > 0 {
-		first := true
-		for netName, netConfig := range oldContainer.NetworkSettings.Networks {
-			if first {
-				networkConfig.EndpointsConfig = map[string]*network.EndpointSettings{
-					netName: netConfig,
-				}
-				first = false
-			} else {
-				additionalNetworks = append(additionalNetworks, netName)
-			}
-		}
-	}
-
-	// Create new container with the specified name
-	resp, err := cli.ContainerCreate(ctx, config, hostConfig, networkConfig, nil, newName)
-	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Connect to additional networks before starting
-	for _, netName := range additionalNetworks {
-		endpointConfig := oldContainer.NetworkSettings.Networks[netName]
-		if err := cli.NetworkConnect(ctx, netName, resp.ID, endpointConfig); err != nil {
-			return fmt.Errorf("failed to connect container to network %s: %w", netName, err)
-		}
-	}
-
-	// Start the new container
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return fmt.Errorf("failed to start container %s: %w", resp.ID, err)
-	}
-
-	return nil
+	_, err := createAndConnectNetworks(ctx, cli, oldContainer, cc, newName)
+	return err
 }

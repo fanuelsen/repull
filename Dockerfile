@@ -37,4 +37,8 @@ RUN chmod +x /usr/local/bin/repull
 # Switch to non-root user
 USER repull
 
+# Verify the process is alive (pid 1 exists in the container)
+HEALTHCHECK --interval=60s --timeout=3s --start-period=5s --retries=3 \
+    CMD kill -0 1 || exit 1
+
 ENTRYPOINT ["/usr/local/bin/repull"]

@@ -13,8 +13,9 @@ RUN go mod download
 COPY . .
 
 # Build static binary (stripped for smaller size)
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X main.version=${VERSION}" \
     -trimpath \
     -o repull ./cmd/repull
 

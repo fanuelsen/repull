@@ -17,8 +17,8 @@ import (
 // Maps old container ID to new container ID.
 type RecreatedContainers map[string]string
 
-// shortID returns the first 12 characters of a container ID, or the full ID if shorter.
-func shortID(id string) string {
+// ShortID returns the first 12 characters of a container ID, or the full ID if shorter.
+func ShortID(id string) string {
 	if len(id) > 12 {
 		return id[:12]
 	}
@@ -48,7 +48,7 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 		}
 		// Also check partial ID matches (Docker often uses short IDs)
 		for oldID, newID := range recreated {
-			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, shortID(oldID)) {
+			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, ShortID(oldID)) {
 				return container.NetworkMode("container:" + newID)
 			}
 		}
@@ -82,6 +82,41 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 
 	// Couldn't resolve, return original mode
 	return mode
+}
+
+// FindNetworkDependents returns all running containers whose network_mode
+// references the given container ID (i.e. network_mode: container:<id>).
+// This is used to find containers that will lose connectivity when the
+// referenced container is recreated.
+func FindNetworkDependents(ctx context.Context, cli *client.Client, containerID string) ([]container.InspectResponse, error) {
+	filter := filters.NewArgs()
+	filter.Add("status", "running")
+
+	containers, err := cli.ContainerList(ctx, container.ListOptions{Filters: filter})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	short := ShortID(containerID)
+	var dependents []container.InspectResponse
+	for _, c := range containers {
+		inspect, err := cli.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			continue
+		}
+		if inspect.HostConfig == nil {
+			continue
+		}
+		mode := string(inspect.HostConfig.NetworkMode)
+		if !strings.HasPrefix(mode, "container:") {
+			continue
+		}
+		ref := strings.TrimPrefix(mode, "container:")
+		if ref == containerID || strings.HasPrefix(containerID, ref) || strings.HasPrefix(ref, short) {
+			dependents = append(dependents, inspect)
+		}
+	}
+	return dependents, nil
 }
 
 // ListRunningContainers returns all currently running containers.
@@ -266,7 +301,7 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 
 	// Rename old container to free up the name for the new one.
 	// If creation fails we can rename it back and restart as rollback.
-	tempName := oldName + "-old-" + shortID(oldID)
+	tempName := oldName + "-old-" + ShortID(oldID)
 	if err := cli.ContainerRename(ctx, oldID, tempName); err != nil {
 		// Rename failed — try to restart the old container and bail
 		cli.ContainerStart(ctx, oldID, container.StartOptions{})

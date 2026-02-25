@@ -147,6 +147,28 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 			// Track the old->new ID mapping for resolving network_mode references
 			recreated[c.ID] = newID
 			log.Printf("[INFO] Successfully recreated %s", sanitize(containerName))
+
+			// Recreate containers that share this container's network namespace.
+			// Their network_mode still points to the old (now dead) container ID,
+			// so they've already lost connectivity — recreating them is recovery, not risk.
+			deps, depErr := docker.FindNetworkDependents(ctx, cli, c.ID)
+			if depErr != nil {
+				log.Printf("[WARN] Failed to find network dependents of %s: %v", sanitize(containerName), depErr)
+			}
+			for _, dep := range deps {
+				depName := strings.TrimPrefix(dep.Name, "/")
+				if depName == "" {
+					depName = docker.ShortID(dep.ID)
+				}
+				log.Printf("[INFO] Recreating network-dependent container %s", sanitize(depName))
+				depNewID, depRecErr := docker.RecreateContainer(ctx, cli, dep, recreated)
+				if depRecErr != nil {
+					log.Printf("[WARN] Failed to recreate network-dependent container %s: %v", sanitize(depName), depRecErr)
+					continue
+				}
+				recreated[dep.ID] = depNewID
+				log.Printf("[INFO] Successfully recreated network-dependent %s", sanitize(depName))
+			}
 		}
 
 		// Send success notification after all containers in group are recreated

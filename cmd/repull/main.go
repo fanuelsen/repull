@@ -16,6 +16,9 @@ import (
 	"github.com/fanuelsen/repull/internal/updater"
 )
 
+// version is set at build time via -ldflags.
+var version = "dev"
+
 var (
 	interval       = flag.Int("interval", 0, "Run every N seconds (0 = single run)")
 	schedule       = flag.String("schedule", "", "Run at specific time daily (HH:MM format, e.g., 23:00)")
@@ -53,7 +56,7 @@ func main() {
 		log.Fatal("[ERROR] --interval must be at least 60 seconds")
 	}
 
-	log.Println("[INFO] Repull starting...")
+	log.Printf("[INFO] Repull %s starting...", version)
 
 	// Set DOCKER_HOST if provided via flag
 	if *dockerHost != "" {

@@ -25,7 +25,7 @@ steps:
     image: golang:1.25.7-alpine
     commands:
       - apk add --no-cache git
-      - go build -ldflags="-s -w" -trimpath -o repull ./cmd/repull
+      - go build -ldflags="-s -w -X main.version=${CI_COMMIT_TAG:-dev}" -trimpath -o repull ./cmd/repull
       - ls -lh repull
     when:
       event:
@@ -39,6 +39,8 @@ steps:
       repo: fanuelsen/repull
       dockerfile: Dockerfile
       platforms: linux/amd64
+      build_args:
+        - VERSION=${CI_COMMIT_TAG}
       tags:
         - latest
         - ${CI_COMMIT_TAG}

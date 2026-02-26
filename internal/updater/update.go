@@ -45,7 +45,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		if err := docker.PullImage(ctx, cli, imageName); err != nil {
 			log.Printf("[ERROR] Failed to pull image %s: %v", sanitize(imageName), err)
 			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s", sanitize(imageName)))
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s: %v", sanitize(imageName), err))
 			}
 			return fmt.Errorf("failed to pull image %s: %w", imageName, err)
 		}
@@ -55,7 +55,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		if err != nil {
 			log.Printf("[ERROR] Failed to get new digest for %s: %v", sanitize(imageName), err)
 			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to get digest for %s", sanitize(imageName)))
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to get digest for %s: %v", sanitize(imageName), err))
 			}
 			return fmt.Errorf("failed to get digest for %s: %w", imageName, err)
 		}
@@ -140,7 +140,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 			if err != nil {
 				log.Printf("[ERROR] Failed to recreate container %s: %v", sanitize(containerName), err)
 				if notifier != nil {
-					notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s", sanitize(containerName)))
+					notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s: %v", sanitize(containerName), err))
 				}
 				return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
 			}

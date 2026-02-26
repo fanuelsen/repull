@@ -35,6 +35,9 @@ COPY --from=builder /build/repull /usr/local/bin/repull
 # Set ownership and make executable
 RUN chmod +x /usr/local/bin/repull
 
+# Label so the running container can identify itself
+LABEL io.repull.app="true"
+
 # Switch to non-root user
 USER repull
 

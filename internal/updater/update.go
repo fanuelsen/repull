@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -88,7 +87,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 
 			// Self-update: container already passed the io.repull.enable=true filter,
 			// so the user has opted in. Use the rename-based self-update flow.
-			if isSelf(c.ID) {
+			if isSelf(c) {
 				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
 
 				// Rename current container to allow new container to use the name
@@ -202,64 +201,12 @@ func sanitize(s string) string {
 	}, s)
 }
 
-var (
-	ownID     string
-	ownIDOnce sync.Once
-)
-
-// isSelf checks if the given container ID belongs to this running instance.
-// It reads /proc/self/cgroup to get the real container ID, which works even
-// when a custom hostname is set. Falls back to hostname prefix matching if
-// the cgroup file is not available (e.g. running outside a container).
-func isSelf(containerID string) bool {
-	ownIDOnce.Do(func() { ownID = detectOwnContainerID() })
-	if len(ownID) == 64 {
-		return containerID == ownID
-	}
-	// Hostname fallback: Docker defaults hostname to first 12 chars of container ID
-	return strings.HasPrefix(containerID, ownID)
-}
-
-// detectOwnContainerID reads /proc/self/cgroup to find the current container ID.
-// Docker embeds the 64-char container ID in the cgroup path in two common formats:
-//   - cgroupsv1:  /docker/<id>
-//   - cgroupsv2 with systemd:  /system.slice/docker-<id>.scope
-//
-// Falls back to os.Hostname() if no container ID is found.
-func detectOwnContainerID() string {
-	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.SplitN(line, ":", 3)
-			if len(fields) != 3 {
-				continue
-			}
-			// Take the last segment of the cgroup path
-			path := fields[2]
-			segment := path
-			if i := strings.LastIndexByte(path, '/'); i >= 0 {
-				segment = path[i+1:]
-			}
-			// Strip systemd scope wrapper: docker-<id>.scope
-			segment = strings.TrimSuffix(segment, ".scope")
-			segment = strings.TrimPrefix(segment, "docker-")
-			if isContainerID(segment) {
-				return segment
-			}
-		}
-	}
-	hostname, _ := os.Hostname()
-	return hostname
-}
-
-// isContainerID returns true if s is a 64-character lowercase hex string.
-func isContainerID(s string) bool {
-	if len(s) != 64 {
+// isSelf checks if the given container has the io.repull.app label,
+// which is baked into the repull Docker image. This is the same approach
+// Watchtower uses (com.centurylinklabs.watchtower label).
+func isSelf(c container.InspectResponse) bool {
+	if c.Config == nil || c.Config.Labels == nil {
 		return false
 	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
+	return c.Config.Labels["io.repull.app"] == "true"
 }

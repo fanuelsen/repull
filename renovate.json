@@ -12,22 +12,14 @@
       "rangeStrategy": "bump"
     },
     {
-      "description": "Auto-merge patch updates for Go toolchain version in go.mod",
+      "description": "Auto-merge minor and patch Go toolchain updates",
       "matchManagers": ["gomod"],
       "matchDepNames": ["go"],
       "matchDepTypes": ["golang"],
-      "matchUpdateTypes": ["patch"],
+      "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr",
-      "automergeStrategy": "squash"
-    },
-    {
-      "description": "Require manual review for minor Go toolchain bumps (may affect compatibility)",
-      "matchManagers": ["gomod"],
-      "matchDepNames": ["go"],
-      "matchDepTypes": ["golang"],
-      "matchUpdateTypes": ["minor"],
-      "automerge": false,
+      "automergeStrategy": "squash",
       "labels": ["dependencies", "go-toolchain"]
     },
     {
@@ -67,6 +59,8 @@
       "groupSlug": "go-deps"
     }
   ],
+
+  "rebaseWhen": "behind-base-branch",
 
   "schedule": ["after 10pm every weekday"],
   "timezone": "Europe/Oslo",

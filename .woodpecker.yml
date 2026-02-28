@@ -8,6 +8,7 @@ steps:
       event:
         - pull_request
         - tag
+        - push
 
   # Step 2: Security audit
   security:
@@ -19,6 +20,7 @@ steps:
       event:
         - pull_request
         - tag
+        - push
 
   # Step 3: Build binary
   build:
@@ -31,8 +33,44 @@ steps:
       event:
         - pull_request
         - tag
+        - push
 
-  # Step 4: Build and push Docker image on tag
+  # Step 4: Auto-tag patch release on push to main
+  auto-tag:
+    image: alpine
+    commands:
+      - apk add --no-cache git
+      - git fetch --tags
+      - |
+        if git tag --points-at HEAD | grep -q '^v'; then
+          echo "HEAD already has a version tag, skipping"
+          exit 0
+        fi
+      - |
+        LATEST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+        if [ -z "$LATEST" ]; then
+          NEW_TAG="v0.1.0"
+        else
+          MAJOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f3)
+          PATCH=$((PATCH + 1))
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+        fi
+        echo "Tagging $NEW_TAG"
+        git tag -a "$NEW_TAG" -m "Auto-release $NEW_TAG"
+        REPO_URL=$(echo "${CI_FORGE_URL}/${CI_REPO}.git" | sed 's|https://|https://token:'"${CI_FORGE_TOKEN}"'@|')
+        git push "$REPO_URL" "$NEW_TAG"
+    environment:
+      CI_FORGE_TOKEN:
+        from_secret: forgejo_token
+    when:
+      event:
+        - push
+      branch:
+        - main
+
+  # Step 5: Build and push Docker image on tag
   docker-release:
     image: woodpeckerci/plugin-docker-buildx
     settings:
@@ -52,7 +90,7 @@ steps:
       event:
         - tag
 
-  # Step 5: Create Forgejo release with binary
+  # Step 6: Create Forgejo release with binary
   forgejo-release:
     image: woodpeckerci/plugin-release
     settings:

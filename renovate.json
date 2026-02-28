@@ -12,10 +12,14 @@
       "rangeStrategy": "bump"
     },
     {
+      "description": "Group Go toolchain (go.mod) and golang Docker image into one PR",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "Go toolchain",
+      "groupSlug": "go-toolchain"
+    },
+    {
       "description": "Auto-merge minor and patch Go toolchain updates",
-      "matchManagers": ["gomod"],
-      "matchDepNames": ["go"],
-      "matchDepTypes": ["golang"],
+      "matchDepNames": ["go", "golang"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr",
@@ -23,8 +27,9 @@
       "labels": ["dependencies", "go-toolchain"]
     },
     {
-      "description": "Auto-merge minor and patch updates for Docker base images",
+      "description": "Auto-merge minor and patch updates for other Docker base images",
       "matchDatasources": ["docker"],
+      "excludeDepNames": ["golang"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr",

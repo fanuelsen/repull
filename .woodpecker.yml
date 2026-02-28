@@ -47,13 +47,13 @@ steps:
           exit 0
         fi
       - |
-        LATEST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+        LATEST=$(git tag -l 'v*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
         if [ -z "$LATEST" ]; then
           NEW_TAG="v0.1.0"
         else
-          MAJOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f1)
-          MINOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f2)
-          PATCH=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f3)
+          MAJOR=$(echo "$LATEST" | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | cut -d. -f3)
           PATCH=$((PATCH + 1))
           NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
         fi

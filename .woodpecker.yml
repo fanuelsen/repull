@@ -47,20 +47,20 @@ steps:
           exit 0
         fi
       - |
-        LATEST=$(git tag -l 'v*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
-        if [ -z "$LATEST" ]; then
+        LATEST=$$(git tag -l 'v*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+        if [ -z "$$LATEST" ]; then
           NEW_TAG="v0.1.0"
         else
-          MAJOR=$(echo "$LATEST" | cut -d. -f1)
-          MINOR=$(echo "$LATEST" | cut -d. -f2)
-          PATCH=$(echo "$LATEST" | cut -d. -f3)
-          PATCH=$((PATCH + 1))
-          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          MAJOR=$$(echo "$$LATEST" | cut -d. -f1)
+          MINOR=$$(echo "$$LATEST" | cut -d. -f2)
+          PATCH=$$(echo "$$LATEST" | cut -d. -f3)
+          PATCH=$$(($$PATCH + 1))
+          NEW_TAG="v$${MAJOR}.$${MINOR}.$${PATCH}"
         fi
-        echo "Tagging $NEW_TAG"
-        git tag -a "$NEW_TAG" -m "Auto-release $NEW_TAG"
-        REPO_URL=$(echo "${CI_FORGE_URL}/${CI_REPO}.git" | sed 's|https://|https://token:'"${CI_FORGE_TOKEN}"'@|')
-        git push "$REPO_URL" "$NEW_TAG"
+        echo "Tagging $$NEW_TAG"
+        git tag -a "$$NEW_TAG" -m "Auto-release $$NEW_TAG"
+        REPO_URL=$$(echo "${CI_FORGE_URL}/${CI_REPO}.git" | sed 's|https://|https://token:'"$${CI_FORGE_TOKEN}"'@|')
+        git push "$$REPO_URL" "$$NEW_TAG"
     environment:
       CI_FORGE_TOKEN:
         from_secret: forgejo_token

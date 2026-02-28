@@ -62,7 +62,7 @@
 
   "rebaseWhen": "behind-base-branch",
 
-  "schedule": ["after 10pm every weekday"],
+  "schedule": ["after 10pm"],
   "timezone": "Europe/Oslo",
 
   "prConcurrentLimit": 3,

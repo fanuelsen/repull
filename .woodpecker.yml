@@ -15,7 +15,29 @@ steps:
     image: golang:1.26.0-alpine
     commands:
       - go install golang.org/x/vuln/cmd/govulncheck@latest
-      - govulncheck ./...
+      - |
+        set +e
+        govulncheck ./... > /tmp/vuln.out 2>&1
+        RESULT=$$?
+        set -e
+        cat /tmp/vuln.out
+        if [ "$$RESULT" -eq 0 ]; then
+          echo "No vulnerabilities found."
+          exit 0
+        elif [ "$$RESULT" -eq 3 ]; then
+          FIXABLE=$$(grep "Fixed in:" /tmp/vuln.out | grep -cv "N/A" || true)
+          if [ "$$FIXABLE" -gt 0 ]; then
+            echo ""
+            echo "FAILED: $$FIXABLE fixable vulnerabilities. Update dependencies."
+            exit 1
+          fi
+          echo ""
+          echo "Only unfixable vulnerabilities (no patch available). Passing."
+          exit 0
+        else
+          echo "govulncheck error (exit code $$RESULT)"
+          exit 1
+        fi
     when:
       event:
         - pull_request

@@ -72,6 +72,18 @@ func main() {
 
 	log.Println("[INFO] Connected to Docker daemon")
 
+	// Remove containers left behind by a previous self-update.
+	if !*dryRun {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		removed, cleanupErr := docker.CleanupSelfUpdateLeftovers(cleanupCtx, cli)
+		cleanupCancel()
+		if cleanupErr != nil {
+			log.Printf("[WARN] Failed to clean up self-update leftovers: %v", cleanupErr)
+		} else if len(removed) > 0 {
+			log.Printf("[INFO] Removed %d stale repull container(s): %s", len(removed), strings.Join(removed, ", "))
+		}
+	}
+
 	// Create Discord notifier
 	notifier, err := notify.NewDiscordNotifier(*discordWebhook)
 	if err != nil {

@@ -119,6 +119,50 @@ func FindNetworkDependents(ctx context.Context, cli *client.Client, containerID 
 	return dependents, nil
 }
 
+// CleanupSelfUpdateLeftovers removes older repull containers left behind by
+// previous self-updates. Self-update renames the old container and stops it,
+// but the old process is killed before it can remove itself, so the new
+// container does it on the next startup.
+//
+// Strategy mirrors Watchtower's CheckForMultipleWatchtowerInstances: list every
+// container carrying the io.repull.app label, sort by creation time, and
+// force-remove all but the most recently created one (the running self).
+//
+// Returns the names of containers that were removed.
+func CleanupSelfUpdateLeftovers(ctx context.Context, cli *client.Client) ([]string, error) {
+	filter := filters.NewArgs()
+	filter.Add("label", "io.repull.app=true")
+
+	containers, err := cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list repull containers: %w", err)
+	}
+
+	if len(containers) <= 1 {
+		return nil, nil
+	}
+
+	sort.Slice(containers, func(i, j int) bool {
+		return containers[i].Created < containers[j].Created
+	})
+
+	var removed []string
+	for _, c := range containers[:len(containers)-1] {
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		if err := cli.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
+			continue
+		}
+		removed = append(removed, name)
+	}
+	return removed, nil
+}
+
 // ListRunningContainers returns all currently running containers.
 func ListRunningContainers(ctx context.Context, cli *client.Client) ([]container.InspectResponse, error) {
 	filter := filters.NewArgs()

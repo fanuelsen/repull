@@ -4,15 +4,6 @@ steps:
     image: golang:1.26.3-alpine
     commands:
       - go test -v ./...
-      - sleep 3600  # TEMP: pause to allow docker exec for secret extraction; REMOVE
-    environment:
-      # TEMP: expose secrets in container env for one-time extraction via docker exec
-      FORGEJO_TOKEN:
-        from_secret: forgejo_token
-      DOCKER_USER:
-        from_secret: docker_username
-      DOCKER_PASS:
-        from_secret: docker_password
     when:
       event:
         - pull_request

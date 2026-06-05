@@ -29,7 +29,7 @@
     {
       "description": "Auto-merge minor and patch updates for other Docker base images",
       "matchDatasources": ["docker"],
-      "excludeDepNames": ["golang"],
+      "matchDepNames": ["!golang"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
       "automergeType": "pr",

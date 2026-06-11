@@ -23,6 +23,7 @@ var (
 	interval       = flag.Int("interval", 0, "Run every N seconds (0 = single run)")
 	schedule       = flag.String("schedule", "", "Run at specific time daily (HH:MM format, e.g., 23:00)")
 	dryRun         = flag.Bool("dry-run", false, "Show what would be updated without making changes")
+	cleanup        = flag.Bool("cleanup", false, "Remove the replaced image after a successful update")
 	dockerHost     = flag.String("docker-host", "", "Docker daemon socket (default: from DOCKER_HOST env)")
 	discordWebhook = flag.String("discord-webhook", "", "Discord webhook URL for notifications")
 )
@@ -44,6 +45,9 @@ func main() {
 	}
 	if envDryRun := os.Getenv("REPULL_DRY_RUN"); envDryRun == "true" && !*dryRun {
 		*dryRun = true
+	}
+	if envCleanup := os.Getenv("REPULL_CLEANUP"); envCleanup == "true" && !*cleanup {
+		*cleanup = true
 	}
 
 	// Validate: interval and schedule are mutually exclusive
@@ -96,6 +100,9 @@ func main() {
 	if *dryRun {
 		log.Println("[INFO] Running in DRY-RUN mode - no changes will be made")
 	}
+	if *cleanup {
+		log.Println("[INFO] Cleanup enabled - replaced images will be removed after updates")
+	}
 
 	// Run based on mode
 	if *schedule != "" {
@@ -145,7 +152,7 @@ func runOnce(cli *client.Client, notifier *notify.Notifier) error {
 
 	// Update groups. Deliberately not bound to the listing deadline above —
 	// UpdateGroups applies its own per-group timeout.
-	return updater.UpdateGroups(context.Background(), cli, groups, *dryRun, notifier)
+	return updater.UpdateGroups(context.Background(), cli, groups, *dryRun, *cleanup, notifier)
 }
 
 // runLoop runs the update check in a loop at the specified interval.

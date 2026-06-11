@@ -24,7 +24,8 @@ const groupTimeout = 10 * time.Minute
 // parallel) for safety. Groups are independent: a failure in one group is
 // logged and reported, but the remaining groups are still processed. Returns
 // the combined errors of all failed groups, or nil if every group succeeded.
-func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]container.InspectResponse, dryRun bool, notifier *notify.Notifier) error {
+// With cleanup enabled, replaced images are removed after a successful update.
+func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]container.InspectResponse, dryRun bool, cleanup bool, notifier *notify.Notifier) error {
 	// Track containers recreated during this update cycle.
 	// This is used to resolve stale network_mode references when containers
 	// use network_mode: service:X (which Docker stores as container:<id>).
@@ -39,7 +40,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		// Each group gets its own deadline so one slow group (big image, slow
 		// registry, stalled daemon) cannot eat the time budget of the others.
 		groupCtx, cancel := context.WithTimeout(ctx, groupTimeout)
-		err := updateGroup(groupCtx, cli, groupKey, containers, dryRun, notifier, recreated)
+		err := updateGroup(groupCtx, cli, groupKey, containers, dryRun, cleanup, notifier, recreated)
 		cancel()
 		if err != nil {
 			log.Printf("[ERROR] %s: %v — continuing with remaining groups", sanitize(groupKey), err)
@@ -52,7 +53,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 
 // updateGroup pulls the group's image and recreates any of its containers that
 // are running an outdated image.
-func updateGroup(ctx context.Context, cli *client.Client, groupKey string, containers []container.InspectResponse, dryRun bool, notifier *notify.Notifier, recreated docker.RecreatedContainers) error {
+func updateGroup(ctx context.Context, cli *client.Client, groupKey string, containers []container.InspectResponse, dryRun bool, cleanup bool, notifier *notify.Notifier, recreated docker.RecreatedContainers) error {
 	log.Printf("[INFO] Checking %s (%d container(s))", sanitize(groupKey), len(containers))
 
 	// Get image name from first container (all containers in a group share the same image)
@@ -213,6 +214,24 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 	// Send success notification after all containers in group are recreated
 	if notifier != nil {
 		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
+	}
+
+	// Remove the replaced image(s) now that no container in this group uses
+	// them. Not forced: if another container still uses an old image, Docker
+	// refuses and we just log it. Only reached when every recreation above
+	// succeeded — on a partial failure the old image stays available.
+	if cleanup {
+		oldImages := make(map[string]struct{})
+		for _, c := range outdated {
+			oldImages[c.Image] = struct{}{}
+		}
+		for id := range oldImages {
+			if err := docker.RemoveImage(ctx, cli, id); err != nil {
+				log.Printf("[WARN] Failed to remove old image %s: %v", truncateDigest(id), err)
+				continue
+			}
+			log.Printf("[INFO] Removed old image %s", truncateDigest(id))
+		}
 	}
 
 	return nil

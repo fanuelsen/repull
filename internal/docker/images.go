@@ -38,3 +38,12 @@ func GetImageID(ctx context.Context, cli *client.Client, imageName string) (stri
 	}
 	return inspect.ID, nil
 }
+
+// RemoveImage removes an image by ID. Used to clean up replaced images after
+// a successful update when --cleanup is enabled. The removal is not forced:
+// if the image is still used by another container, Docker refuses and the
+// caller logs it.
+func RemoveImage(ctx context.Context, cli *client.Client, imageID string) error {
+	_, err := cli.ImageRemove(ctx, imageID, image.RemoveOptions{})
+	return err
+}

@@ -122,6 +122,9 @@ repull --interval 300 --discord-webhook "https://discord.com/api/webhooks/..."
 
 # Dry-run (preview only)
 repull --dry-run
+
+# Remove replaced images after updating (keeps disk usage in check)
+repull --interval 300 --cleanup
 ```
 
 ## Configuration
@@ -132,6 +135,7 @@ repull --dry-run
 | `--schedule HH:MM` | `REPULL_SCHEDULE` | Run daily at specific time |
 | `--discord-webhook URL` | `REPULL_DISCORD_WEBHOOK` | Discord webhook for notifications |
 | `--dry-run` | `REPULL_DRY_RUN` | Preview changes without applying |
+| `--cleanup` | `REPULL_CLEANUP` | Remove the replaced image after a successful update |
 | `--docker-host HOST` | `DOCKER_HOST` | Docker daemon address |
 
 **Note:** `--interval` and `--schedule` are mutually exclusive.
@@ -143,12 +147,40 @@ repull --dry-run
 1. Lists all running containers
 2. Filters for `io.repull.enable=true` label
 3. Groups by Docker Compose service
-4. Pulls latest image and compares digest
-5. Recreates container if digest changed (preserving all config)
+4. Pulls the latest image
+5. Compares each container's image ID against the freshly pulled image
+6. Recreates containers running an outdated image (preserving all config)
 
 ## Self-Updates
 
 Repull can update itself. If you add `io.repull.enable=true` to repull's own container, it will pull new images and recreate itself just like any other container. If you don't want repull to self-update, simply don't add the label — repull only touches containers that are explicitly opted in.
+
+**Note:** Run only one repull instance per Docker daemon. At startup, repull removes older repull containers (label `io.repull.app=true`) left over from previous self-updates — a deliberately-running second instance would be removed too.
+
+## Private Registries
+
+The Docker daemon does not store registry credentials — `docker login` saves them client-side in `~/.docker/config.json`, and every client (the Docker CLI, repull, ...) must send them along with each pull. Repull reads the same `config.json`, so private registries work as long as repull can see that file.
+
+When running repull in a container, mount the config read-only:
+
+```yaml
+services:
+  repull:
+    image: fanuelsen/repull
+    volumes:
+      - ~/.docker/config.json:/home/repull/.docker/config.json:ro
+    # ...
+```
+
+When running the binary directly, it just works for the user that ran `docker login`.
+
+**Limitation:** only inline `auths` entries are supported (the default on Linux servers). Credential helpers (`credsStore` / `credHelpers`, e.g. Docker Desktop's keychain integration) are not — if your `config.json` uses one, create a config file with inline credentials for repull instead:
+
+```bash
+echo '{"auths":{"ghcr.io":{"auth":"'$(echo -n 'USERNAME:TOKEN' | base64)'"}}}' > /path/to/repull-docker/config.json
+```
+
+and mount it as shown above (or point the `DOCKER_CONFIG` environment variable at its directory).
 
 ## Docker Images
 

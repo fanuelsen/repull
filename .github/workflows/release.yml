@@ -27,7 +27,7 @@ jobs:
 
       - name: Build binary
         run: |
-          go build -ldflags="-s -w" -trimpath -o repull ./cmd/repull
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -trimpath -o repull ./cmd/repull
           chmod +x repull
           ls -lh repull
 
@@ -59,6 +59,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v3

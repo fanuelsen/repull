@@ -33,9 +33,11 @@ func main() {
 
 	// Override flags with environment variables if set
 	if envInterval := os.Getenv("REPULL_INTERVAL"); envInterval != "" && *interval == 0 {
-		if val, err := strconv.Atoi(envInterval); err == nil {
-			*interval = val
+		val, err := strconv.Atoi(envInterval)
+		if err != nil {
+			log.Fatalf("[ERROR] Invalid REPULL_INTERVAL %q: must be a number of seconds", envInterval)
 		}
+		*interval = val
 	}
 	if envSchedule := os.Getenv("REPULL_SCHEDULE"); envSchedule != "" && *schedule == "" {
 		*schedule = envSchedule
@@ -55,9 +57,11 @@ func main() {
 		log.Fatal("[ERROR] Cannot use --interval and --schedule together")
 	}
 
-	// Validate: interval must be at least 60 seconds to avoid hammering registries
-	if *interval > 0 && *interval < 60 {
-		log.Fatal("[ERROR] --interval must be at least 60 seconds")
+	// Validate: interval must be at least 60 seconds to avoid hammering
+	// registries. Also catches negative values, which would otherwise fall
+	// through to single-run mode silently.
+	if *interval != 0 && *interval < 60 {
+		log.Fatal("[ERROR] --interval must be at least 60 seconds (or 0 for a single run)")
 	}
 
 	log.Printf("[INFO] Repull %s starting...", version)

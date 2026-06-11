@@ -31,14 +31,6 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		// Get image name from first container (all containers in a group share the same image)
 		imageName := containers[0].Config.Image
 
-		// Get current digest before pulling
-		oldDigest, err := docker.GetImageDigest(ctx, cli, imageName)
-		if err != nil {
-			log.Printf("[WARN] Failed to get current digest for %s: %v", sanitize(imageName), err)
-			// Continue with empty digest - will trigger update after pull
-			oldDigest = ""
-		}
-
 		// Pull latest image
 		log.Printf("[INFO] Pulling image %s", sanitize(imageName))
 		if err := docker.PullImage(ctx, cli, imageName); err != nil {
@@ -49,33 +41,37 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 			return fmt.Errorf("failed to pull image %s: %w", imageName, err)
 		}
 
-		// Get new digest after pulling
-		newDigest, err := docker.GetImageDigest(ctx, cli, imageName)
+		// Resolve the image ID the tag points to after the pull
+		latestID, err := docker.GetImageID(ctx, cli, imageName)
 		if err != nil {
-			log.Printf("[ERROR] Failed to get new digest for %s: %v", sanitize(imageName), err)
+			log.Printf("[ERROR] Failed to inspect image %s: %v", sanitize(imageName), err)
 			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to get digest for %s: %v", sanitize(imageName), err))
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to inspect image %s: %v", sanitize(imageName), err))
 			}
-			return fmt.Errorf("failed to get digest for %s: %w", imageName, err)
+			return fmt.Errorf("failed to inspect image %s: %w", imageName, err)
 		}
 
-		// Check if digest changed
-		if !docker.HasDigestChanged(oldDigest, newDigest) {
-			log.Printf("[INFO] Image digest unchanged, skipping %s", sanitize(groupKey))
+		// Compare each container's image ID against the latest. Unlike comparing
+		// the tag's digest before/after the pull, this detects outdated containers
+		// even when the image was already pulled earlier — by a dry run, a manual
+		// docker pull, or a cycle that pulled successfully but failed to recreate.
+		outdated := filterOutdatedContainers(containers, latestID)
+		if len(outdated) == 0 {
+			log.Printf("[INFO] Already running latest image, skipping %s", sanitize(groupKey))
 			continue
 		}
 
-		// Digest changed - recreate containers
-		log.Printf("[INFO] Image digest changed: %s -> %s", truncateDigest(oldDigest), truncateDigest(newDigest))
+		oldID := outdated[0].Image
+		log.Printf("[INFO] Image updated: %s -> %s", truncateDigest(oldID), truncateDigest(latestID))
 
 		if dryRun {
-			log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", sanitize(groupKey), len(containers))
+			log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", sanitize(groupKey), len(outdated))
 			continue
 		}
 
-		// Recreate all containers in the group
-		log.Printf("[INFO] Recreating %d container(s)", len(containers))
-		for _, c := range containers {
+		// Recreate the outdated containers in the group
+		log.Printf("[INFO] Recreating %d container(s)", len(outdated))
+		for _, c := range outdated {
 			containerName := strings.TrimPrefix(c.Name, "/")
 			if containerName == "" {
 				if len(c.ID) > 12 {
@@ -109,7 +105,9 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
 					// Rollback: rename back to original
 					log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
-					cli.ContainerRename(ctx, c.ID, containerName)
+					rbCtx, cancel := docker.RollbackContext(ctx)
+					cli.ContainerRename(rbCtx, c.ID, containerName)
+					cancel()
 					if notifier != nil {
 						notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
 					}
@@ -118,7 +116,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 
 				log.Printf("[INFO] New container started, stopping old container")
 				if notifier != nil {
-					notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldDigest, newDigest)
+					notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
 				}
 
 				// Explicitly stop the old (renamed) container via the Docker API so that
@@ -126,11 +124,14 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 				// by Docker as an unexpected exit, which triggers the restart policy.
 				// ContainerStop marks the container as explicitly stopped, preventing that.
 				// With timeout=0 Docker sends SIGKILL immediately; our process is killed
-				// before reaching os.Exit below.
+				// before reaching os.Exit below. Uses a detached context so the stop
+				// still goes through if the update's context has expired.
+				stopCtx, cancel := docker.RollbackContext(ctx)
 				stopTimeout := 0
-				if err := cli.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+				if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
 					log.Printf("[WARN] Failed to stop old container, falling back to os.Exit: %v", err)
 				}
+				cancel()
 				os.Exit(0)
 			}
 
@@ -172,7 +173,7 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 
 		// Send success notification after all containers in group are recreated
 		if notifier != nil {
-			notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldDigest, newDigest)
+			notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
 		}
 	}
 

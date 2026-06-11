@@ -26,23 +26,15 @@ func PullImage(ctx context.Context, cli *client.Client, imageName string) error 
 	return err
 }
 
-// GetImageDigest returns the digest (sha256) of an image.
-func GetImageDigest(ctx context.Context, cli *client.Client, imageName string) (string, error) {
+// GetImageID returns the image ID (sha256:...) that the given image name
+// currently resolves to. Comparing this against a container's Image field
+// (which holds the ID of the image the container was created from) tells us
+// whether the container is running the latest local image — regardless of
+// who pulled it or when.
+func GetImageID(ctx context.Context, cli *client.Client, imageName string) (string, error) {
 	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
 	if err != nil {
 		return "", err
 	}
-
-	// Use RepoDigests if available (more reliable for registry images)
-	if len(inspect.RepoDigests) > 0 {
-		return inspect.RepoDigests[0], nil
-	}
-
-	// Fallback to image ID
 	return inspect.ID, nil
-}
-
-// HasDigestChanged compares two image digests and returns true if they differ.
-func HasDigestChanged(oldDigest, newDigest string) bool {
-	return oldDigest != newDigest
 }

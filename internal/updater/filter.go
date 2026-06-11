@@ -23,3 +23,17 @@ func FilterOptedInContainers(containers []container.InspectResponse) []container
 
 	return filtered
 }
+
+// filterOutdatedContainers returns the containers whose image ID differs from
+// latestID, i.e. containers not running the image their tag currently points to.
+func filterOutdatedContainers(containers []container.InspectResponse, latestID string) []container.InspectResponse {
+	var outdated []container.InspectResponse
+
+	for _, c := range containers {
+		if c.Image != latestID {
+			outdated = append(outdated, c)
+		}
+	}
+
+	return outdated
+}

@@ -9,8 +9,13 @@ import (
 )
 
 // PullImage pulls the latest version of an image from the registry.
+// Credentials for private registries are read from Docker's config.json
+// (see RegistryAuthFor); public images work without any configuration.
 func PullImage(ctx context.Context, cli *client.Client, imageName string) error {
-	reader, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+	opts := image.PullOptions{
+		RegistryAuth: RegistryAuthFor(imageName),
+	}
+	reader, err := cli.ImagePull(ctx, imageName, opts)
 	if err != nil {
 		return err
 	}
@@ -41,4 +46,3 @@ func GetImageDigest(ctx context.Context, cli *client.Client, imageName string) (
 func HasDigestChanged(oldDigest, newDigest string) bool {
 	return oldDigest != newDigest
 }
-

@@ -32,7 +32,8 @@ func NewDiscordNotifier(webhookURL string) (*Notifier, error) {
 	return &Notifier{webhookURL: webhookURL}, nil
 }
 
-// SendUpdate sends a notification about a successful container update
+// SendUpdate sends a notification about a successful container update.
+// The digest strings are included as-is; callers truncate them for display.
 func (n *Notifier) SendUpdate(service, image, oldDigest, newDigest string) error {
 	if n == nil {
 		return nil
@@ -40,7 +41,7 @@ func (n *Notifier) SendUpdate(service, image, oldDigest, newDigest string) error
 
 	message := map[string]interface{}{
 		"content": fmt.Sprintf("✅ Updated %s\nImage: %s\n%s → %s",
-			service, image, truncate(oldDigest), truncate(newDigest)),
+			service, image, oldDigest, newDigest),
 	}
 
 	return n.send(message)
@@ -84,12 +85,4 @@ func (n *Notifier) send(message map[string]interface{}) error {
 	}
 
 	return nil
-}
-
-// truncate shortens a digest for display
-func truncate(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19] + "..."
-	}
-	return digest
 }

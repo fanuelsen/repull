@@ -148,7 +148,7 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 				// the stop below kills us and the notification at the end of
 				// the group never runs. Non-self instances are covered by the
 				// group-level notification instead.
-				notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
+				notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
 			}
 
 			// Explicitly stop the old (renamed) container via the Docker API so that
@@ -212,7 +212,7 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 
 	// Send success notification after all containers in group are recreated
 	if notifier != nil {
-		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
+		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
 	}
 
 	return nil

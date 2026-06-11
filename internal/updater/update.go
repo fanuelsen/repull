@@ -102,10 +102,18 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 			containerName = docker.ShortID(c.ID)
 		}
 
-		// Self-update: container already passed the io.repull.enable=true filter,
-		// so the user has opted in. Use the rename-based self-update flow.
-		if isSelf(c) {
-			log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
+		// Containers running a repull image need the rename-first flow: such a
+		// container may be this very process, which cannot stop itself before
+		// the replacement exists. The container already passed the
+		// io.repull.enable=true filter, so the user has opted in.
+		if isRepullInstance(c) {
+			hostname, _ := os.Hostname()
+			self := isSelfContainer(c, hostname)
+			if self {
+				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
+			} else {
+				log.Printf("[INFO] Updating repull instance %s (not this process)", sanitize(containerName))
+			}
 
 			// Rename current container to allow new container to use the name
 			suffix := c.ID
@@ -135,7 +143,11 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 			}
 
 			log.Printf("[INFO] New container started, stopping old container")
-			if notifier != nil {
+			if self && notifier != nil {
+				// Send before stopping: if the old container is this process,
+				// the stop below kills us and the notification at the end of
+				// the group never runs. Non-self instances are covered by the
+				// group-level notification instead.
 				notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
 			}
 
@@ -143,16 +155,24 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 			// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
 			// by Docker as an unexpected exit, which triggers the restart policy.
 			// ContainerStop marks the container as explicitly stopped, preventing that.
-			// With timeout=0 Docker sends SIGKILL immediately; our process is killed
-			// before reaching os.Exit below. Uses a detached context so the stop
-			// still goes through if the update's context has expired.
+			// If the old container is this process, timeout=0 makes Docker SIGKILL us
+			// here; execution past this point means it was another instance (or the
+			// stop failed). Uses a detached context so the stop still goes through
+			// if the update's context has expired.
 			stopCtx, cancel := docker.RollbackContext(ctx)
 			stopTimeout := 0
 			if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-				log.Printf("[WARN] Failed to stop old container, falling back to os.Exit: %v", err)
+				log.Printf("[WARN] Failed to stop old container: %v", err)
 			}
 			cancel()
-			os.Exit(0)
+
+			if self {
+				// The stop above should have killed us; exit as a fallback so
+				// the new instance takes over cleanly.
+				os.Exit(0)
+			}
+			// Another repull instance was updated; this process is unaffected.
+			continue
 		}
 
 		log.Printf("[INFO] Recreating container %s", sanitize(containerName))
@@ -220,12 +240,29 @@ func sanitize(s string) string {
 	}, s)
 }
 
-// isSelf checks if the given container has the io.repull.app label,
+// isRepullInstance checks if the given container has the io.repull.app label,
 // which is baked into the repull Docker image. This is the same approach
-// Watchtower uses (com.centurylinklabs.watchtower label).
-func isSelf(c container.InspectResponse) bool {
+// Watchtower uses (com.centurylinklabs.watchtower label). It matches any
+// repull instance — not necessarily the one running this process; use
+// isSelfContainer to check identity.
+func isRepullInstance(c container.InspectResponse) bool {
 	if c.Config == nil || c.Config.Labels == nil {
 		return false
 	}
 	return c.Config.Labels["io.repull.app"] == "true"
+}
+
+// isSelfContainer reports whether the given container is the one this process
+// is running in. Inside a container the hostname defaults to the short
+// container ID; if the user set a custom hostname, fall back to matching it
+// against the container name. When repull runs as a plain host binary neither
+// matches, so other repull containers are correctly treated as not-self.
+func isSelfContainer(c container.InspectResponse, hostname string) bool {
+	if hostname == "" {
+		return false
+	}
+	if strings.HasPrefix(c.ID, hostname) {
+		return true
+	}
+	return strings.TrimPrefix(c.Name, "/") == hostname
 }

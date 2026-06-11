@@ -185,13 +185,24 @@ func runSchedule(cli *client.Client, notifier *notify.Notifier) {
 
 	for {
 		// Calculate time until next occurrence
-		next := nextOccurrence(targetTime)
-		duration := time.Until(next)
+		next := nextOccurrence(targetTime, time.Now())
 
-		log.Printf("[INFO] Next run scheduled at %s (in %s)", next.Format("2006-01-02 15:04:05"), duration.Round(time.Second))
+		log.Printf("[INFO] Next run scheduled at %s (in %s)", next.Format("2006-01-02 15:04:05"), time.Until(next).Round(time.Second))
 
-		// Sleep until target time
-		time.Sleep(duration)
+		// Sleep in short chunks and re-check the wall clock. time.Sleep uses
+		// the monotonic clock, so a single long sleep overshoots the target
+		// when the machine suspends or the clock is adjusted; chunked sleeping
+		// keeps the run within a minute of the scheduled wall-clock time.
+		for {
+			remaining := time.Until(next)
+			if remaining <= 0 {
+				break
+			}
+			if remaining > time.Minute {
+				remaining = time.Minute
+			}
+			time.Sleep(remaining)
+		}
 
 		// Run update
 		log.Printf("[INFO] Running scheduled check...")
@@ -223,14 +234,16 @@ func parseScheduleTime(schedule string) (time.Time, error) {
 	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()), nil
 }
 
-// nextOccurrence calculates the next occurrence of target time
-func nextOccurrence(target time.Time) time.Time {
-	now := time.Now()
+// nextOccurrence calculates the next occurrence of target's wall-clock time
+// strictly after now.
+func nextOccurrence(target time.Time, now time.Time) time.Time {
 	next := time.Date(now.Year(), now.Month(), now.Day(), target.Hour(), target.Minute(), 0, 0, now.Location())
 
-	// If target time already passed today, schedule for tomorrow
-	if next.Before(now) {
-		next = next.Add(24 * time.Hour)
+	// If target time already passed today, schedule for tomorrow.
+	// Day()+1 is calendar-aware: unlike Add(24h), it lands on the same
+	// wall-clock time across DST transitions (where a day is 23 or 25 hours).
+	if !next.After(now) {
+		next = time.Date(now.Year(), now.Month(), now.Day()+1, target.Hour(), target.Minute(), 0, 0, now.Location())
 	}
 
 	return next

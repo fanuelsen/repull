@@ -2,10 +2,12 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -13,168 +15,184 @@ import (
 	"github.com/fanuelsen/repull/internal/notify"
 )
 
-// UpdateGroups processes each group of containers and updates them if their image digest has changed.
-// It updates one group at a time (sequential, not parallel) for safety.
+// groupTimeout bounds the work for a single group: pulling the image and
+// recreating its containers. Generous enough for large images on slow links.
+const groupTimeout = 10 * time.Minute
+
+// UpdateGroups processes each group of containers and updates them if they are
+// running an outdated image. It updates one group at a time (sequential, not
+// parallel) for safety. Groups are independent: a failure in one group is
+// logged and reported, but the remaining groups are still processed. Returns
+// the combined errors of all failed groups, or nil if every group succeeded.
 func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]container.InspectResponse, dryRun bool, notifier *notify.Notifier) error {
 	// Track containers recreated during this update cycle.
 	// This is used to resolve stale network_mode references when containers
 	// use network_mode: service:X (which Docker stores as container:<id>).
 	recreated := make(docker.RecreatedContainers)
 
+	var errs []error
 	for groupKey, containers := range groups {
 		if len(containers) == 0 {
 			continue
 		}
 
-		log.Printf("[INFO] Checking %s (%d container(s))", sanitize(groupKey), len(containers))
-
-		// Get image name from first container (all containers in a group share the same image)
-		imageName := containers[0].Config.Image
-
-		// Pull latest image
-		log.Printf("[INFO] Pulling image %s", sanitize(imageName))
-		if err := docker.PullImage(ctx, cli, imageName); err != nil {
-			log.Printf("[ERROR] Failed to pull image %s: %v", sanitize(imageName), err)
-			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s: %v", sanitize(imageName), err))
-			}
-			return fmt.Errorf("failed to pull image %s: %w", imageName, err)
-		}
-
-		// Resolve the image ID the tag points to after the pull
-		latestID, err := docker.GetImageID(ctx, cli, imageName)
+		// Each group gets its own deadline so one slow group (big image, slow
+		// registry, stalled daemon) cannot eat the time budget of the others.
+		groupCtx, cancel := context.WithTimeout(ctx, groupTimeout)
+		err := updateGroup(groupCtx, cli, groupKey, containers, dryRun, notifier, recreated)
+		cancel()
 		if err != nil {
-			log.Printf("[ERROR] Failed to inspect image %s: %v", sanitize(imageName), err)
-			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to inspect image %s: %v", sanitize(imageName), err))
-			}
-			return fmt.Errorf("failed to inspect image %s: %w", imageName, err)
+			log.Printf("[ERROR] %s: %v — continuing with remaining groups", sanitize(groupKey), err)
+			errs = append(errs, fmt.Errorf("%s: %w", groupKey, err))
 		}
+	}
 
-		// Compare each container's image ID against the latest. Unlike comparing
-		// the tag's digest before/after the pull, this detects outdated containers
-		// even when the image was already pulled earlier — by a dry run, a manual
-		// docker pull, or a cycle that pulled successfully but failed to recreate.
-		outdated := filterOutdatedContainers(containers, latestID)
-		if len(outdated) == 0 {
-			log.Printf("[INFO] Already running latest image, skipping %s", sanitize(groupKey))
-			continue
-		}
+	return errors.Join(errs...)
+}
 
-		oldID := outdated[0].Image
-		log.Printf("[INFO] Image updated: %s -> %s", truncateDigest(oldID), truncateDigest(latestID))
+// updateGroup pulls the group's image and recreates any of its containers that
+// are running an outdated image.
+func updateGroup(ctx context.Context, cli *client.Client, groupKey string, containers []container.InspectResponse, dryRun bool, notifier *notify.Notifier, recreated docker.RecreatedContainers) error {
+	log.Printf("[INFO] Checking %s (%d container(s))", sanitize(groupKey), len(containers))
 
-		if dryRun {
-			log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", sanitize(groupKey), len(outdated))
-			continue
-		}
+	// Get image name from first container (all containers in a group share the same image)
+	imageName := containers[0].Config.Image
 
-		// Recreate the outdated containers in the group
-		log.Printf("[INFO] Recreating %d container(s)", len(outdated))
-		for _, c := range outdated {
-			containerName := strings.TrimPrefix(c.Name, "/")
-			if containerName == "" {
-				if len(c.ID) > 12 {
-					containerName = c.ID[:12]
-				} else {
-					containerName = c.ID
-				}
-			}
-
-			// Self-update: container already passed the io.repull.enable=true filter,
-			// so the user has opted in. Use the rename-based self-update flow.
-			if isSelf(c) {
-				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
-
-				// Rename current container to allow new container to use the name
-				suffix := c.ID
-				if len(c.ID) > 8 {
-					suffix = c.ID[:8]
-				}
-				tempName := containerName + "-old-" + suffix
-				if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
-					log.Printf("[ERROR] Failed to rename container for self-update: %v", err)
-					if notifier != nil {
-						notifier.SendError(sanitize(groupKey), "Self-update failed: rename error")
-					}
-					return fmt.Errorf("failed to rename container for self-update: %w", err)
-				}
-				log.Printf("[INFO] Renamed %s to %s", sanitize(containerName), sanitize(tempName))
-
-				// Create and start new container with original name
-				if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
-					// Rollback: rename back to original
-					log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
-					rbCtx, cancel := docker.RollbackContext(ctx)
-					cli.ContainerRename(rbCtx, c.ID, containerName)
-					cancel()
-					if notifier != nil {
-						notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
-					}
-					return fmt.Errorf("failed to create new container for self-update: %w", err)
-				}
-
-				log.Printf("[INFO] New container started, stopping old container")
-				if notifier != nil {
-					notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
-				}
-
-				// Explicitly stop the old (renamed) container via the Docker API so that
-				// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
-				// by Docker as an unexpected exit, which triggers the restart policy.
-				// ContainerStop marks the container as explicitly stopped, preventing that.
-				// With timeout=0 Docker sends SIGKILL immediately; our process is killed
-				// before reaching os.Exit below. Uses a detached context so the stop
-				// still goes through if the update's context has expired.
-				stopCtx, cancel := docker.RollbackContext(ctx)
-				stopTimeout := 0
-				if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-					log.Printf("[WARN] Failed to stop old container, falling back to os.Exit: %v", err)
-				}
-				cancel()
-				os.Exit(0)
-			}
-
-			log.Printf("[INFO] Recreating container %s", sanitize(containerName))
-			newID, err := docker.RecreateContainer(ctx, cli, c, recreated)
-			if err != nil {
-				log.Printf("[ERROR] Failed to recreate container %s: %v", sanitize(containerName), err)
-				if notifier != nil {
-					notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s: %v", sanitize(containerName), err))
-				}
-				return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
-			}
-			// Track the old->new ID mapping for resolving network_mode references
-			recreated[c.ID] = newID
-			log.Printf("[INFO] Successfully recreated %s", sanitize(containerName))
-
-			// Recreate containers that share this container's network namespace.
-			// Their network_mode still points to the old (now dead) container ID,
-			// so they've already lost connectivity — recreating them is recovery, not risk.
-			deps, depErr := docker.FindNetworkDependents(ctx, cli, c.ID)
-			if depErr != nil {
-				log.Printf("[WARN] Failed to find network dependents of %s: %v", sanitize(containerName), depErr)
-			}
-			for _, dep := range deps {
-				depName := strings.TrimPrefix(dep.Name, "/")
-				if depName == "" {
-					depName = docker.ShortID(dep.ID)
-				}
-				log.Printf("[INFO] Recreating network-dependent container %s", sanitize(depName))
-				depNewID, depRecErr := docker.RecreateContainer(ctx, cli, dep, recreated)
-				if depRecErr != nil {
-					log.Printf("[WARN] Failed to recreate network-dependent container %s: %v", sanitize(depName), depRecErr)
-					continue
-				}
-				recreated[dep.ID] = depNewID
-				log.Printf("[INFO] Successfully recreated network-dependent %s", sanitize(depName))
-			}
-		}
-
-		// Send success notification after all containers in group are recreated
+	// Pull latest image
+	log.Printf("[INFO] Pulling image %s", sanitize(imageName))
+	if err := docker.PullImage(ctx, cli, imageName); err != nil {
 		if notifier != nil {
-			notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
+			notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s: %v", sanitize(imageName), err))
 		}
+		return fmt.Errorf("failed to pull image %s: %w", imageName, err)
+	}
+
+	// Resolve the image ID the tag points to after the pull
+	latestID, err := docker.GetImageID(ctx, cli, imageName)
+	if err != nil {
+		if notifier != nil {
+			notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to inspect image %s: %v", sanitize(imageName), err))
+		}
+		return fmt.Errorf("failed to inspect image %s: %w", imageName, err)
+	}
+
+	// Compare each container's image ID against the latest. Unlike comparing
+	// the tag's digest before/after the pull, this detects outdated containers
+	// even when the image was already pulled earlier — by a dry run, a manual
+	// docker pull, or a cycle that pulled successfully but failed to recreate.
+	outdated := filterOutdatedContainers(containers, latestID)
+	if len(outdated) == 0 {
+		log.Printf("[INFO] Already running latest image, skipping %s", sanitize(groupKey))
+		return nil
+	}
+
+	oldID := outdated[0].Image
+	log.Printf("[INFO] Image updated: %s -> %s", truncateDigest(oldID), truncateDigest(latestID))
+
+	if dryRun {
+		log.Printf("[DRY-RUN] Would recreate %s (%d container(s))", sanitize(groupKey), len(outdated))
+		return nil
+	}
+
+	// Recreate the outdated containers in the group
+	log.Printf("[INFO] Recreating %d container(s)", len(outdated))
+	for _, c := range outdated {
+		containerName := strings.TrimPrefix(c.Name, "/")
+		if containerName == "" {
+			containerName = docker.ShortID(c.ID)
+		}
+
+		// Self-update: container already passed the io.repull.enable=true filter,
+		// so the user has opted in. Use the rename-based self-update flow.
+		if isSelf(c) {
+			log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
+
+			// Rename current container to allow new container to use the name
+			suffix := c.ID
+			if len(c.ID) > 8 {
+				suffix = c.ID[:8]
+			}
+			tempName := containerName + "-old-" + suffix
+			if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
+				if notifier != nil {
+					notifier.SendError(sanitize(groupKey), "Self-update failed: rename error")
+				}
+				return fmt.Errorf("failed to rename container for self-update: %w", err)
+			}
+			log.Printf("[INFO] Renamed %s to %s", sanitize(containerName), sanitize(tempName))
+
+			// Create and start new container with original name
+			if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
+				// Rollback: rename back to original
+				log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
+				rbCtx, cancel := docker.RollbackContext(ctx)
+				cli.ContainerRename(rbCtx, c.ID, containerName)
+				cancel()
+				if notifier != nil {
+					notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
+				}
+				return fmt.Errorf("failed to create new container for self-update: %w", err)
+			}
+
+			log.Printf("[INFO] New container started, stopping old container")
+			if notifier != nil {
+				notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
+			}
+
+			// Explicitly stop the old (renamed) container via the Docker API so that
+			// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
+			// by Docker as an unexpected exit, which triggers the restart policy.
+			// ContainerStop marks the container as explicitly stopped, preventing that.
+			// With timeout=0 Docker sends SIGKILL immediately; our process is killed
+			// before reaching os.Exit below. Uses a detached context so the stop
+			// still goes through if the update's context has expired.
+			stopCtx, cancel := docker.RollbackContext(ctx)
+			stopTimeout := 0
+			if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+				log.Printf("[WARN] Failed to stop old container, falling back to os.Exit: %v", err)
+			}
+			cancel()
+			os.Exit(0)
+		}
+
+		log.Printf("[INFO] Recreating container %s", sanitize(containerName))
+		newID, err := docker.RecreateContainer(ctx, cli, c, recreated)
+		if err != nil {
+			if notifier != nil {
+				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s: %v", sanitize(containerName), err))
+			}
+			return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
+		}
+		// Track the old->new ID mapping for resolving network_mode references
+		recreated[c.ID] = newID
+		log.Printf("[INFO] Successfully recreated %s", sanitize(containerName))
+
+		// Recreate containers that share this container's network namespace.
+		// Their network_mode still points to the old (now dead) container ID,
+		// so they've already lost connectivity — recreating them is recovery, not risk.
+		deps, depErr := docker.FindNetworkDependents(ctx, cli, c.ID)
+		if depErr != nil {
+			log.Printf("[WARN] Failed to find network dependents of %s: %v", sanitize(containerName), depErr)
+		}
+		for _, dep := range deps {
+			depName := strings.TrimPrefix(dep.Name, "/")
+			if depName == "" {
+				depName = docker.ShortID(dep.ID)
+			}
+			log.Printf("[INFO] Recreating network-dependent container %s", sanitize(depName))
+			depNewID, depRecErr := docker.RecreateContainer(ctx, cli, dep, recreated)
+			if depRecErr != nil {
+				log.Printf("[WARN] Failed to recreate network-dependent container %s: %v", sanitize(depName), depRecErr)
+				continue
+			}
+			recreated[dep.ID] = depNewID
+			log.Printf("[INFO] Successfully recreated network-dependent %s", sanitize(depName))
+		}
+	}
+
+	// Send success notification after all containers in group are recreated
+	if notifier != nil {
+		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), oldID, latestID)
 	}
 
 	return nil

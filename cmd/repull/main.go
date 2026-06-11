@@ -115,9 +115,11 @@ func main() {
 
 // runOnce performs a single update check and execution.
 func runOnce(cli *client.Client, notifier *notify.Notifier) error {
-	// 10-minute deadline covers the full update cycle. Prevents a stalled Docker
-	// daemon or hung image pull from blocking the loop indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Listing and inspecting containers is fast; a short deadline prevents a
+	// stalled Docker daemon from blocking the loop indefinitely. The update
+	// work itself is bounded per group inside UpdateGroups, so one slow group
+	// cannot eat the time budget of the others.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// List running containers
@@ -141,8 +143,9 @@ func runOnce(cli *client.Client, notifier *notify.Notifier) error {
 	groups := updater.GroupByComposeService(optedIn)
 	log.Printf("[INFO] Grouped into %d service(s)", len(groups))
 
-	// Update groups
-	return updater.UpdateGroups(ctx, cli, groups, *dryRun, notifier)
+	// Update groups. Deliberately not bound to the listing deadline above —
+	// UpdateGroups applies its own per-group timeout.
+	return updater.UpdateGroups(context.Background(), cli, groups, *dryRun, notifier)
 }
 
 // runLoop runs the update check in a loop at the specified interval.

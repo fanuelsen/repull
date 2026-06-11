@@ -29,11 +29,8 @@ RUN apk --no-cache add ca-certificates
 RUN addgroup -g 1000 repull && \
     adduser -D -u 1000 -G repull repull
 
-# Copy binary from builder
+# Copy binary from builder (permissions are preserved from the build stage)
 COPY --from=builder /build/repull /usr/local/bin/repull
-
-# Set ownership and make executable
-RUN chmod +x /usr/local/bin/repull
 
 # Label so the running container can identify itself
 LABEL io.repull.app="true"
@@ -41,8 +38,9 @@ LABEL io.repull.app="true"
 # Switch to non-root user
 USER repull
 
-# Verify the process is alive (pid 1 exists in the container)
-HEALTHCHECK --interval=60s --timeout=3s --start-period=5s --retries=3 \
-    CMD kill -0 1 || exit 1
+# No HEALTHCHECK on purpose: repull is a sleep-mostly loop, not a server.
+# If the process dies the container exits and the restart policy handles it;
+# a check like "kill -0 1" can never fail and only reports a misleading
+# "healthy".
 
 ENTRYPOINT ["/usr/local/bin/repull"]

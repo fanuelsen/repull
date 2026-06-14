@@ -243,6 +243,34 @@ func sanitizeEndpoint(old *network.EndpointSettings, oldContainerID string) *net
 	return ep
 }
 
+// recreatePortConfig computes the exposed ports, published-port bindings, and
+// publish-all flag for a recreated container.
+//
+// Normally it starts from the image/container's own exposed ports (covering
+// compose "expose:" entries) and adds every published port. But a container
+// that joins another container's network namespace (network_mode: container:,
+// which compose's "service:<name>" resolves to) shares that container's ports
+// and may declare none of its own — the daemon rejects such a create with
+// "conflicting options: port exposing/publishing and the container type network
+// mode". Because the inspected container still reports the image's EXPOSE in
+// Config.ExposedPorts, those must be dropped explicitly; everything is returned
+// empty for that mode.
+func recreatePortConfig(cfg *container.Config, host *container.HostConfig) (nat.PortSet, nat.PortMap, bool) {
+	exposed := nat.PortSet{}
+	bindings := nat.PortMap{}
+	if strings.HasPrefix(string(host.NetworkMode), "container:") {
+		return exposed, bindings, false
+	}
+	for port := range cfg.ExposedPorts {
+		exposed[port] = struct{}{}
+	}
+	for port, b := range host.PortBindings {
+		bindings[port] = b
+		exposed[port] = struct{}{}
+	}
+	return exposed, bindings, host.PublishAllPorts
+}
+
 // buildContainerConfigs extracts the container, host, and network configs from
 // an existing container's inspect response. This is used by both RecreateContainer
 // and CreateAndStartContainer to avoid duplicating the config-building logic.
@@ -258,22 +286,12 @@ func buildContainerConfigs(ctx context.Context, cli *client.Client, old containe
 		oldHost = &container.HostConfig{}
 	}
 
-	// Build port bindings. Start from the image/container's own exposed ports
-	// (covers compose "expose:" entries), then add every published port.
-	portBindings := nat.PortMap{}
-	exposedPorts := nat.PortSet{}
-	for port := range oldConfig.ExposedPorts {
-		exposedPorts[port] = struct{}{}
-	}
-	for port, bindings := range oldHost.PortBindings {
-		portBindings[port] = bindings
-		exposedPorts[port] = struct{}{}
-	}
-
 	// Determine if we can set hostname
 	// Hostname conflicts with network modes: container:, host, none
 	mode := string(oldHost.NetworkMode)
 	canSetHostname := !strings.HasPrefix(mode, "container:") && mode != "host" && mode != "none"
+
+	exposedPorts, portBindings, publishAllPorts := recreatePortConfig(oldConfig, oldHost)
 
 	config := &container.Config{
 		Image:        oldConfig.Image,
@@ -310,7 +328,7 @@ func buildContainerConfigs(ctx context.Context, cli *client.Client, old containe
 		VolumesFrom:     oldHost.VolumesFrom,
 		VolumeDriver:    oldHost.VolumeDriver,
 		PortBindings:    portBindings,
-		PublishAllPorts: oldHost.PublishAllPorts,
+		PublishAllPorts: publishAllPorts,
 		RestartPolicy:   oldHost.RestartPolicy,
 		AutoRemove:      oldHost.AutoRemove,
 		NetworkMode:     networkMode,

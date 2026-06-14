@@ -3,8 +3,65 @@ package docker
 import (
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 )
+
+// TestRecreatePortConfigDropsPortsForContainerNetns verifies that a container
+// sharing another container's network namespace (network_mode: container:/
+// service:) gets no exposed/published ports, even though its inspect response
+// still reports the image's EXPOSE. Copying those would make the daemon reject
+// the create with "conflicting options: port exposing and the container type
+// network mode".
+func TestRecreatePortConfigDropsPortsForContainerNetns(t *testing.T) {
+	cfg := &container.Config{
+		ExposedPorts: nat.PortSet{"8989/tcp": struct{}{}},
+	}
+	host := &container.HostConfig{
+		NetworkMode:     "container:abc123",
+		PublishAllPorts: true,
+		PortBindings:    nat.PortMap{"8989/tcp": []nat.PortBinding{{HostPort: "8989"}}},
+	}
+
+	exposed, bindings, publishAll := recreatePortConfig(cfg, host)
+
+	if len(exposed) != 0 {
+		t.Errorf("exposed = %v, want empty for container netns", exposed)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("bindings = %v, want empty for container netns", bindings)
+	}
+	if publishAll {
+		t.Errorf("publishAll = true, want false for container netns")
+	}
+}
+
+// TestRecreatePortConfigKeepsPortsForBridge verifies that normal (bridge)
+// containers still carry their exposed and published ports, including
+// image/compose "expose:" entries that have no host binding.
+func TestRecreatePortConfigKeepsPortsForBridge(t *testing.T) {
+	cfg := &container.Config{
+		ExposedPorts: nat.PortSet{"443/tcp": struct{}{}, "8080/tcp": struct{}{}},
+	}
+	host := &container.HostConfig{
+		NetworkMode:     "bridge",
+		PublishAllPorts: true,
+		PortBindings:    nat.PortMap{"443/tcp": []nat.PortBinding{{HostPort: "443"}}},
+	}
+
+	exposed, bindings, publishAll := recreatePortConfig(cfg, host)
+
+	if _, ok := exposed["8080/tcp"]; !ok {
+		t.Errorf("exposed missing image-exposed 8080/tcp: %v", exposed)
+	}
+	if _, ok := bindings["443/tcp"]; !ok {
+		t.Errorf("bindings missing published 443/tcp: %v", bindings)
+	}
+	if !publishAll {
+		t.Errorf("publishAll = false, want true for bridge")
+	}
+}
 
 func TestSanitizeEndpoint(t *testing.T) {
 	oldContainerID := "abcdef123456789012345678901234567890"

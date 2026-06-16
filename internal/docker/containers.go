@@ -440,12 +440,11 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 	oldID := oldContainer.ID
 	oldName := oldContainer.Name
 
-	// Stop the old container
-	timeout := 10
-	stopOptions := container.StopOptions{
-		Timeout: &timeout,
-	}
-	if err := cli.ContainerStop(ctx, oldID, stopOptions); err != nil {
+	// Stop the old container. A nil timeout lets Docker use the container's
+	// own StopTimeout (compose stop_grace_period) or the daemon default of
+	// 10s — a hardcoded value here would cut short containers that declare
+	// they need longer to shut down cleanly (e.g. databases).
+	if err := cli.ContainerStop(ctx, oldID, container.StopOptions{}); err != nil {
 		return "", fmt.Errorf("failed to stop container %s: %w", oldID, err)
 	}
 

@@ -19,38 +19,34 @@ import (
 // version is set at build time via -ldflags.
 var version = "dev"
 
+// Environment variables provide the flag defaults, so an explicit flag
+// always wins over its environment variable.
 var (
-	interval       = flag.Int("interval", 0, "Run every N seconds (0 = single run)")
-	schedule       = flag.String("schedule", "", "Run at specific time daily (HH:MM format, e.g., 23:00)")
-	dryRun         = flag.Bool("dry-run", false, "Show what would be updated without making changes")
-	cleanup        = flag.Bool("cleanup", false, "Remove the replaced image after a successful update")
+	interval       = flag.Int("interval", envInt("REPULL_INTERVAL"), "Run every N seconds (0 = single run)")
+	schedule       = flag.String("schedule", os.Getenv("REPULL_SCHEDULE"), "Run at specific time daily (HH:MM format, e.g., 23:00)")
+	dryRun         = flag.Bool("dry-run", os.Getenv("REPULL_DRY_RUN") == "true", "Show what would be updated without making changes")
+	cleanup        = flag.Bool("cleanup", os.Getenv("REPULL_CLEANUP") == "true", "Remove the replaced image after a successful update")
 	dockerHost     = flag.String("docker-host", "", "Docker daemon socket (default: from DOCKER_HOST env)")
-	discordWebhook = flag.String("discord-webhook", "", "Discord webhook URL for notifications")
+	discordWebhook = flag.String("discord-webhook", os.Getenv("REPULL_DISCORD_WEBHOOK"), "Discord webhook URL for notifications")
 )
+
+// envInt parses an integer environment variable for use as a flag default.
+// An unset variable yields 0; an invalid value is fatal — silently falling
+// back to 0 would turn a typo into an unintended single-run mode.
+func envInt(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Fatalf("[ERROR] Invalid %s %q: must be a number of seconds", name, v)
+	}
+	return n
+}
 
 func main() {
 	flag.Parse()
-
-	// Override flags with environment variables if set
-	if envInterval := os.Getenv("REPULL_INTERVAL"); envInterval != "" && *interval == 0 {
-		val, err := strconv.Atoi(envInterval)
-		if err != nil {
-			log.Fatalf("[ERROR] Invalid REPULL_INTERVAL %q: must be a number of seconds", envInterval)
-		}
-		*interval = val
-	}
-	if envSchedule := os.Getenv("REPULL_SCHEDULE"); envSchedule != "" && *schedule == "" {
-		*schedule = envSchedule
-	}
-	if envWebhook := os.Getenv("REPULL_DISCORD_WEBHOOK"); envWebhook != "" && *discordWebhook == "" {
-		*discordWebhook = envWebhook
-	}
-	if envDryRun := os.Getenv("REPULL_DRY_RUN"); envDryRun == "true" && !*dryRun {
-		*dryRun = true
-	}
-	if envCleanup := os.Getenv("REPULL_CLEANUP"); envCleanup == "true" && !*cleanup {
-		*cleanup = true
-	}
 
 	// Validate: interval and schedule are mutually exclusive
 	if *interval > 0 && *schedule != "" {
@@ -62,6 +58,17 @@ func main() {
 	// through to single-run mode silently.
 	if *interval != 0 && *interval < 60 {
 		log.Fatal("[ERROR] --interval must be at least 60 seconds (or 0 for a single run)")
+	}
+
+	// Validate the schedule up front so a typo fails fast, before any Docker
+	// connection or leftover cleanup happens.
+	var targetTime time.Time
+	if *schedule != "" {
+		var err error
+		targetTime, err = parseScheduleTime(*schedule)
+		if err != nil {
+			log.Fatalf("[ERROR] Invalid schedule format: %v (use HH:MM)", err)
+		}
 	}
 
 	log.Printf("[INFO] Repull %s starting...", version)
@@ -111,7 +118,7 @@ func main() {
 	// Run based on mode
 	if *schedule != "" {
 		log.Printf("[INFO] Running in schedule mode (daily at %s)", *schedule)
-		runSchedule(cli, notifier)
+		runSchedule(cli, notifier, targetTime)
 	} else if *interval > 0 {
 		log.Printf("[INFO] Running in loop mode (interval: %d seconds)", *interval)
 		runLoop(cli, notifier)
@@ -180,13 +187,8 @@ func runLoop(cli *client.Client, notifier *notify.Notifier) {
 	}
 }
 
-// runSchedule runs the update check daily at a specific time
-func runSchedule(cli *client.Client, notifier *notify.Notifier) {
-	targetTime, err := parseScheduleTime(*schedule)
-	if err != nil {
-		log.Fatalf("[ERROR] Invalid schedule format: %v (use HH:MM)", err)
-	}
-
+// runSchedule runs the update check daily at targetTime's wall-clock time.
+func runSchedule(cli *client.Client, notifier *notify.Notifier, targetTime time.Time) {
 	for {
 		// Calculate time until next occurrence
 		next := nextOccurrence(targetTime, time.Now())

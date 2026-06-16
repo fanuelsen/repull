@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -32,27 +33,32 @@ func NewDiscordNotifier(webhookURL string) (*Notifier, error) {
 	return &Notifier{webhookURL: webhookURL}, nil
 }
 
+// webhookMessage is the payload Discord expects for a simple text message.
+type webhookMessage struct {
+	Content string `json:"content"`
+}
+
 // SendUpdate sends a notification about a successful container update.
 // The digest strings are included as-is; callers truncate them for display.
-func (n *Notifier) SendUpdate(service, image, oldDigest, newDigest string) error {
+// Failures are logged, not returned: a broken webhook should never affect
+// the update cycle itself.
+func (n *Notifier) SendUpdate(service, image, oldDigest, newDigest string) {
 	if n == nil {
-		return nil
+		return
 	}
 
-	message := map[string]interface{}{
-		"content": fmt.Sprintf("✅ Updated %s\nImage: %s\n%s → %s",
-			service, image, oldDigest, newDigest),
-	}
-
-	return n.send(message)
+	n.send(fmt.Sprintf("✅ Updated %s\nImage: %s\n%s → %s",
+		service, image, oldDigest, newDigest))
 }
 
 // SendError sends a notification about an update failure.
 // Error messages are truncated to avoid leaking sensitive data (e.g. registry
 // credentials that may appear in Docker API error strings) to Discord.
-func (n *Notifier) SendError(service, errorMsg string) error {
+// Failures are logged, not returned: a broken webhook should never affect
+// the update cycle itself.
+func (n *Notifier) SendError(service, errorMsg string) {
 	if n == nil {
-		return nil
+		return
 	}
 
 	const maxLen = 200
@@ -60,29 +66,22 @@ func (n *Notifier) SendError(service, errorMsg string) error {
 		errorMsg = errorMsg[:maxLen] + "..."
 	}
 
-	message := map[string]interface{}{
-		"content": fmt.Sprintf("❌ Failed to update %s\nError: %s", service, errorMsg),
-	}
-
-	return n.send(message)
+	n.send(fmt.Sprintf("❌ Failed to update %s\nError: %s", service, errorMsg))
 }
 
-// send performs the HTTP POST to Discord webhook
-func (n *Notifier) send(message map[string]interface{}) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
+// send performs the HTTP POST to the Discord webhook, logging any failure.
+func (n *Notifier) send(content string) {
+	// Marshalling a struct of one string field cannot fail.
+	data, _ := json.Marshal(webhookMessage{Content: content})
 
 	resp, err := httpClient.Post(n.webhookURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {
-		return err
+		log.Printf("[WARN] Discord notification failed: %v", err)
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
+		log.Printf("[WARN] Discord notification failed: webhook returned status %d", resp.StatusCode)
 	}
-
-	return nil
 }

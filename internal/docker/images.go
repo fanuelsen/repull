@@ -32,7 +32,7 @@ func PullImage(ctx context.Context, cli *client.Client, imageName string) error 
 // whether the container is running the latest local image — regardless of
 // who pulled it or when.
 func GetImageID(ctx context.Context, cli *client.Client, imageName string) (string, error) {
-	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageName)
+	inspect, err := cli.ImageInspect(ctx, imageName)
 	if err != nil {
 		return "", err
 	}

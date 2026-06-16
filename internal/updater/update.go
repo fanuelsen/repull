@@ -44,7 +44,10 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		cancel()
 		if err != nil {
 			log.Printf("[ERROR] %s: %v — continuing with remaining groups", sanitize(groupKey), err)
-			errs = append(errs, fmt.Errorf("%s: %w", groupKey, err))
+			// Sanitize here too: this error is logged by main without further
+			// escaping, so a crafted compose project name must not be able to
+			// inject log lines through it.
+			errs = append(errs, fmt.Errorf("%s: %w", sanitize(groupKey), err))
 		}
 	}
 
@@ -62,19 +65,15 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 	// Pull latest image
 	log.Printf("[INFO] Pulling image %s", sanitize(imageName))
 	if err := docker.PullImage(ctx, cli, imageName); err != nil {
-		if notifier != nil {
-			notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s: %v", sanitize(imageName), err))
-		}
-		return fmt.Errorf("failed to pull image %s: %w", imageName, err)
+		notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to pull image %s: %v", sanitize(imageName), err))
+		return fmt.Errorf("failed to pull image %s: %w", sanitize(imageName), err)
 	}
 
 	// Resolve the image ID the tag points to after the pull
 	latestID, err := docker.GetImageID(ctx, cli, imageName)
 	if err != nil {
-		if notifier != nil {
-			notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to inspect image %s: %v", sanitize(imageName), err))
-		}
-		return fmt.Errorf("failed to inspect image %s: %w", imageName, err)
+		notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to inspect image %s: %v", sanitize(imageName), err))
+		return fmt.Errorf("failed to inspect image %s: %w", sanitize(imageName), err)
 	}
 
 	// Compare each container's image ID against the latest. Unlike comparing
@@ -108,81 +107,19 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 		// the replacement exists. The container already passed the
 		// io.repull.enable=true filter, so the user has opted in.
 		if isRepullInstance(c) {
-			hostname, _ := os.Hostname()
-			self := isSelfContainer(c, hostname)
-			if self {
-				log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
-			} else {
-				log.Printf("[INFO] Updating repull instance %s (not this process)", sanitize(containerName))
-			}
-
-			// Rename current container to allow new container to use the name
-			suffix := c.ID
-			if len(c.ID) > 8 {
-				suffix = c.ID[:8]
-			}
-			tempName := containerName + "-old-" + suffix
-			if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
-				if notifier != nil {
-					notifier.SendError(sanitize(groupKey), "Self-update failed: rename error")
-				}
-				return fmt.Errorf("failed to rename container for self-update: %w", err)
-			}
-			log.Printf("[INFO] Renamed %s to %s", sanitize(containerName), sanitize(tempName))
-
-			// Create and start new container with original name
-			if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
-				// Rollback: rename back to original
-				log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
-				rbCtx, cancel := docker.RollbackContext(ctx)
-				cli.ContainerRename(rbCtx, c.ID, containerName)
-				cancel()
-				if notifier != nil {
-					notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
-				}
-				return fmt.Errorf("failed to create new container for self-update: %w", err)
-			}
-
-			log.Printf("[INFO] New container started, stopping old container")
-			if self && notifier != nil {
-				// Send before stopping: if the old container is this process,
-				// the stop below kills us and the notification at the end of
-				// the group never runs. Non-self instances are covered by the
-				// group-level notification instead.
-				notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
-			}
-
-			// Explicitly stop the old (renamed) container via the Docker API so that
-			// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
-			// by Docker as an unexpected exit, which triggers the restart policy.
-			// ContainerStop marks the container as explicitly stopped, preventing that.
-			// If the old container is this process, timeout=0 makes Docker SIGKILL us
-			// here; execution past this point means it was another instance (or the
-			// stop failed). Uses a detached context so the stop still goes through
-			// if the update's context has expired.
-			stopCtx, cancel := docker.RollbackContext(ctx)
-			stopTimeout := 0
-			if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-				log.Printf("[WARN] Failed to stop old container: %v", err)
-			}
-			cancel()
-
-			if self {
-				// The stop above should have killed us; exit as a fallback so
-				// the new instance takes over cleanly.
-				os.Exit(0)
+			if err := updateRepullInstance(ctx, cli, c, containerName, groupKey, imageName, oldID, latestID, notifier); err != nil {
+				return err
 			}
 			// Another repull instance was updated; this process is unaffected.
+			// (A self-update never reaches this point — the process exits.)
 			continue
 		}
 
 		log.Printf("[INFO] Recreating container %s", sanitize(containerName))
 		newID, err := docker.RecreateContainer(ctx, cli, c, recreated)
 		if err != nil {
-			if notifier != nil {
-				notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s: %v", sanitize(containerName), err))
-			}
-			return fmt.Errorf("failed to recreate container %s: %w", containerName, err)
+			notifier.SendError(sanitize(groupKey), fmt.Sprintf("Failed to recreate container %s: %v", sanitize(containerName), err))
+			return fmt.Errorf("failed to recreate container %s: %w", sanitize(containerName), err)
 		}
 		// Track the old->new ID mapping for resolving network_mode references
 		recreated[c.ID] = newID
@@ -212,9 +149,7 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 	}
 
 	// Send success notification after all containers in group are recreated
-	if notifier != nil {
-		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
-	}
+	notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
 
 	// Remove the replaced image(s) now that no container in this group uses
 	// them. Not forced: if another container still uses an old image, Docker
@@ -234,6 +169,75 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 		}
 	}
 
+	return nil
+}
+
+// updateRepullInstance updates a container running a repull image via the
+// rename-first flow: rename the old container, start the replacement under the
+// original name, then stop the old one. This order is required because the
+// container may be this very process, which cannot stop itself before the
+// replacement exists.
+//
+// If the container is this process (self-update), the function never returns:
+// the ContainerStop kills us, with os.Exit(0) as a fallback. For any other
+// repull instance it returns normally and the caller continues.
+func updateRepullInstance(ctx context.Context, cli *client.Client, c container.InspectResponse, containerName, groupKey, imageName, oldID, latestID string, notifier *notify.Notifier) error {
+	hostname, _ := os.Hostname()
+	self := isSelfContainer(c, hostname)
+	if self {
+		log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
+	} else {
+		log.Printf("[INFO] Updating repull instance %s (not this process)", sanitize(containerName))
+	}
+
+	// Rename current container to allow new container to use the name
+	tempName := containerName + "-old-" + docker.ShortID(c.ID)
+	if err := cli.ContainerRename(ctx, c.ID, tempName); err != nil {
+		notifier.SendError(sanitize(groupKey), "Self-update failed: rename error")
+		return fmt.Errorf("failed to rename container for self-update: %w", err)
+	}
+	log.Printf("[INFO] Renamed %s to %s", sanitize(containerName), sanitize(tempName))
+
+	// Create and start new container with original name
+	if err := docker.CreateAndStartContainer(ctx, cli, c, containerName); err != nil {
+		// Rollback: rename back to original
+		log.Printf("[ERROR] Failed to create new container, rolling back: %v", err)
+		rbCtx, cancel := docker.RollbackContext(ctx)
+		cli.ContainerRename(rbCtx, c.ID, containerName)
+		cancel()
+		notifier.SendError(sanitize(groupKey), "Self-update failed: could not start new container")
+		return fmt.Errorf("failed to create new container for self-update: %w", err)
+	}
+
+	log.Printf("[INFO] New container started, stopping old container")
+	if self {
+		// Send before stopping: if the old container is this process,
+		// the stop below kills us and the notification at the end of
+		// the group never runs. Non-self instances are covered by the
+		// group-level notification instead.
+		notifier.SendUpdate(sanitize(groupKey), sanitize(imageName), truncateDigest(oldID), truncateDigest(latestID))
+	}
+
+	// Explicitly stop the old (renamed) container via the Docker API so that
+	// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
+	// by Docker as an unexpected exit, which triggers the restart policy.
+	// ContainerStop marks the container as explicitly stopped, preventing that.
+	// If the old container is this process, timeout=0 makes Docker SIGKILL us
+	// here; execution past this point means it was another instance (or the
+	// stop failed). Uses a detached context so the stop still goes through
+	// if the update's context has expired.
+	stopCtx, cancel := docker.RollbackContext(ctx)
+	stopTimeout := 0
+	if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+		log.Printf("[WARN] Failed to stop old container: %v", err)
+	}
+	cancel()
+
+	if self {
+		// The stop above should have killed us; exit as a fallback so
+		// the new instance takes over cleanly.
+		os.Exit(0)
+	}
 	return nil
 }
 

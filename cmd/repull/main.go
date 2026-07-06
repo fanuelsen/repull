@@ -24,8 +24,8 @@ var version = "dev"
 var (
 	interval       = flag.Int("interval", envInt("REPULL_INTERVAL"), "Run every N seconds (0 = single run)")
 	schedule       = flag.String("schedule", os.Getenv("REPULL_SCHEDULE"), "Run at specific time daily (HH:MM format, e.g., 23:00)")
-	dryRun         = flag.Bool("dry-run", os.Getenv("REPULL_DRY_RUN") == "true", "Show what would be updated without making changes")
-	cleanup        = flag.Bool("cleanup", os.Getenv("REPULL_CLEANUP") == "true", "Remove the replaced image after a successful update")
+	dryRun         = flag.Bool("dry-run", envBool("REPULL_DRY_RUN"), "Show what would be updated without making changes")
+	cleanup        = flag.Bool("cleanup", envBool("REPULL_CLEANUP"), "Remove the replaced image after a successful update")
 	dockerHost     = flag.String("docker-host", "", "Docker daemon socket (default: from DOCKER_HOST env)")
 	discordWebhook = flag.String("discord-webhook", os.Getenv("REPULL_DISCORD_WEBHOOK"), "Discord webhook URL for notifications")
 )
@@ -43,6 +43,22 @@ func envInt(name string) int {
 		log.Fatalf("[ERROR] Invalid %s %q: must be a number of seconds", name, v)
 	}
 	return n
+}
+
+// envBool parses a boolean environment variable for use as a flag default.
+// An unset variable yields false; any value strconv.ParseBool does not accept
+// (e.g. "yes", "on") is fatal — REPULL_DRY_RUN=True silently meaning false
+// would turn an intended dry run into a live update.
+func envBool(name string) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Fatalf("[ERROR] Invalid %s %q: must be true or false", name, v)
+	}
+	return b
 }
 
 func main() {

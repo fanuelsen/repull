@@ -9,6 +9,35 @@ import (
 	_ "time/tzdata"
 )
 
+// TestEnvBool covers the accepted values. The rejection path (e.g. "yes")
+// calls log.Fatalf and cannot run in-process; what matters here is that the
+// spellings users actually reach for ("True", "TRUE", "1") enable the flag
+// instead of silently reading as false.
+func TestEnvBool(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: false},
+		{value: "true", want: true},
+		{value: "True", want: true},
+		{value: "TRUE", want: true},
+		{value: "1", want: true},
+		{value: "false", want: false},
+		{value: "False", want: false},
+		{value: "0", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run("value="+tt.value, func(t *testing.T) {
+			t.Setenv("REPULL_TEST_BOOL", tt.value)
+			if got := envBool("REPULL_TEST_BOOL"); got != tt.want {
+				t.Errorf("envBool(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseScheduleTime(t *testing.T) {
 	tests := []struct {
 		name     string

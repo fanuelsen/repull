@@ -151,11 +151,16 @@ repull --interval 300 --cleanup
 5. Compares each container's image ID against the freshly pulled image
 6. Recreates containers running an outdated image (preserving all config)
 
+## Trust Model
+
+- Repull runs whatever the tag points to at pull time. There is no digest pinning or signature verification — labeling a container extends full trust to its image publisher and registry, and a compromised upstream image is deployed automatically within one interval. Only label images you would also update by hand without inspecting.
+- Docker merges image labels into container labels. An image that bakes in `LABEL io.repull.enable="true"` opts its containers into auto-update even though the label never appears in your compose file — check `docker inspect` if an unlabeled container is being updated unexpectedly.
+
 ## Self-Updates
 
 Repull can update itself. If you add `io.repull.enable=true` to repull's own container, it will pull new images and recreate itself just like any other container. If you don't want repull to self-update, simply don't add the label — repull only touches containers that are explicitly opted in.
 
-**Note:** Run only one repull instance per Docker daemon. At startup, repull removes older repull containers (label `io.repull.app=true`) left over from previous self-updates — a deliberately-running second instance would be removed too.
+**Note:** Run only one repull instance per Docker daemon — two instances would race to update the same containers. At startup, repull removes containers left over from its own previous self-updates, identified by the `<name>-old-<id>` rename a self-update applies (not by label alone, so other containers are never touched).
 
 ## Private Registries
 
@@ -181,6 +186,8 @@ echo '{"auths":{"ghcr.io":{"auth":"'$(echo -n 'USERNAME:TOKEN' | base64)'"}}}' >
 ```
 
 and mount it as shown above (or point the `DOCKER_CONFIG` environment variable at its directory).
+
+**Security note:** credentials travel with every pull request over the `DOCKER_HOST` connection. On a `tcp://` host without TLS they cross the network in cleartext — fine on an internal compose network like the socket-proxy setup above, but for a remote daemon use TLS (`DOCKER_CERT_PATH`) or an `ssh://` host. Repull logs a warning when credentials are about to be sent over an unencrypted connection.
 
 ## Docker Images
 

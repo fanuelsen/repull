@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/fanuelsen/repull/internal/sanitize"
 )
 
 // httpClient is used for all Discord webhook requests.
@@ -34,8 +36,16 @@ func NewDiscordNotifier(webhookURL string) (*Notifier, error) {
 }
 
 // webhookMessage is the payload Discord expects for a simple text message.
+// AllowedMentions with an empty parse list disables all mentions: without it,
+// a container or image name containing "@everyone" (or a role/user mention)
+// would trigger a real ping in the channel.
 type webhookMessage struct {
-	Content string `json:"content"`
+	Content         string          `json:"content"`
+	AllowedMentions allowedMentions `json:"allowed_mentions"`
+}
+
+type allowedMentions struct {
+	Parse []string `json:"parse"`
 }
 
 // SendUpdate sends a notification about a successful container update.
@@ -70,9 +80,14 @@ func (n *Notifier) SendError(service, errorMsg string) {
 }
 
 // send performs the HTTP POST to the Discord webhook, logging any failure.
+// Content is sanitized here at the sink so no caller can forget it — error
+// text in particular can echo registry-controlled response bodies.
 func (n *Notifier) send(content string) {
-	// Marshalling a struct of one string field cannot fail.
-	data, _ := json.Marshal(webhookMessage{Content: content})
+	// Marshalling a struct of strings and a string slice cannot fail.
+	data, _ := json.Marshal(webhookMessage{
+		Content:         sanitize.String(content),
+		AllowedMentions: allowedMentions{Parse: []string{}},
+	})
 
 	resp, err := httpClient.Post(n.webhookURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {

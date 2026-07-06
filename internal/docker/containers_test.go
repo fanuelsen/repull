@@ -63,6 +63,39 @@ func TestRecreatePortConfigKeepsPortsForBridge(t *testing.T) {
 	}
 }
 
+// TestIsSelfUpdateLeftover verifies that startup cleanup only matches
+// containers carrying the exact rename fingerprint self-update produces —
+// "<name>-old-<its own short ID>". Anything else (a normal repull instance,
+// a container whose image merely bakes in the io.repull.app label, a suffix
+// borrowed from a different container's ID) must not match, since matching
+// containers are force-removed.
+func TestIsSelfUpdateLeftover(t *testing.T) {
+	id := "abcdef123456789012345678901234567890"
+	short := ShortID(id) // abcdef123456
+
+	tests := []struct {
+		name          string
+		containerName string
+		id            string
+		want          bool
+	}{
+		{name: "renamed leftover", containerName: "repull-old-" + short, id: id, want: true},
+		{name: "normal instance name", containerName: "repull", id: id, want: false},
+		{name: "suffix from another container's ID", containerName: "repull-old-000000000000", id: id, want: false},
+		{name: "suffix only, empty original name", containerName: "-old-" + short, id: id, want: false},
+		{name: "empty name", containerName: "", id: id, want: false},
+		{name: "old marker without ID", containerName: "repull-old-", id: id, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSelfUpdateLeftover(tt.containerName, tt.id); got != tt.want {
+				t.Errorf("isSelfUpdateLeftover(%q, %q) = %v, want %v", tt.containerName, tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSanitizeEndpoint(t *testing.T) {
 	oldContainerID := "abcdef123456789012345678901234567890"
 	oldShort := ShortID(oldContainerID)

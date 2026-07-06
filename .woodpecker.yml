@@ -14,7 +14,11 @@ steps:
   security:
     image: golang:1.26.4-alpine
     commands:
-      - go install golang.org/x/vuln/cmd/govulncheck@latest
+      # Pinned instead of @latest so a compromised release can't silently run
+      # in CI; the renovate comment keeps the pin current (customManagers in
+      # renovate.json).
+      # renovate: datasource=go depName=golang.org/x/vuln
+      - go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
       - |
         set +e
         govulncheck ./... > /tmp/vuln.out 2>&1
@@ -83,8 +87,13 @@ steps:
         fi
         echo "Tagging $$NEW_TAG"
         git tag -a "$$NEW_TAG" -m "Auto-release $$NEW_TAG"
-        REPO_URL=$$(echo "${CI_FORGE_URL}/${CI_REPO}.git" | sed 's|https://|https://token:'"$${CI_FORGE_TOKEN}"'@|')
-        git push "$$REPO_URL" "$$NEW_TAG"
+        # Keep the token out of the URL: git prints the remote URL in error
+        # messages ("fatal: unable to access 'https://...'"), which would leak
+        # the token into CI logs on a failed push. The helper reads it from the
+        # environment at push time instead; same credentials as before
+        # (username "token", token as password).
+        git config credential.helper '!f() { echo "username=token"; echo "password=$${CI_FORGE_TOKEN}"; }; f'
+        git push "${CI_FORGE_URL}/${CI_REPO}.git" "$$NEW_TAG"
     environment:
       CI_FORGE_TOKEN:
         from_secret: forgejo_token

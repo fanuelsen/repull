@@ -32,6 +32,24 @@ type dockerConfigAuth struct {
 // logged once instead of on every pull of every cycle.
 var credHelperWarn sync.Once
 
+// plaintextWarn makes sure the unencrypted-transport warning is logged once.
+var plaintextWarn sync.Once
+
+// warnIfPlaintextTransport logs once when registry credentials are about to
+// be sent over an unencrypted Docker connection. The credentials ride in the
+// X-Registry-Auth header of every pull request; on a tcp:// host without TLS
+// they cross the network in cleartext. The SDK only enables TLS for tcp://
+// when DOCKER_CERT_PATH is set (client.FromEnv); unix://, npipe:// and ssh://
+// transports never leave the machine unencrypted.
+func warnIfPlaintextTransport() {
+	host := os.Getenv("DOCKER_HOST")
+	if strings.HasPrefix(host, "tcp://") && os.Getenv("DOCKER_CERT_PATH") == "" {
+		plaintextWarn.Do(func() {
+			log.Printf("[WARN] Registry credentials will be sent unencrypted over %s — fine on an internal Docker network (e.g. a socket proxy), but for a remote daemon use TLS (DOCKER_CERT_PATH) or an ssh:// host", host)
+		})
+	}
+}
+
 // RegistryAuthFor returns encoded credentials for the registry hosting
 // imageName, suitable for image.PullOptions.RegistryAuth. Returns "" when no
 // credentials are configured, which is fine for public images.
@@ -94,6 +112,8 @@ func RegistryAuthFor(imageName string) string {
 		log.Printf("[WARN] Failed to encode registry credentials for %s: %v", domain, err)
 		return ""
 	}
+
+	warnIfPlaintextTransport()
 	return encoded
 }
 

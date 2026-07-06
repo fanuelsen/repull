@@ -65,6 +65,17 @@
     }
   ],
 
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update pinned 'go install' tool versions annotated with a renovate comment",
+      "managerFilePatterns": ["/(^|/)\\.woodpecker\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\n\\s*- go install \\S+@(?<currentValue>v[0-9.]+)"
+      ]
+    }
+  ],
+
   "rebaseWhen": "behind-base-branch",
 
   "prConcurrentLimit": 3,

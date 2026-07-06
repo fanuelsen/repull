@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -131,14 +132,19 @@ func FindNetworkDependents(ctx context.Context, cli *client.Client, containerID 
 	return dependents, nil
 }
 
-// CleanupSelfUpdateLeftovers removes older repull containers left behind by
-// previous self-updates. Self-update renames the old container and stops it,
-// but the old process is killed before it can remove itself, so the new
-// container does it on the next startup.
+// CleanupSelfUpdateLeftovers removes containers left behind by previous
+// self-updates. Self-update renames the old container and stops it, but the
+// old process is killed before it can remove itself, so the new container
+// does it on the next startup.
 //
-// Strategy mirrors Watchtower's CheckForMultipleWatchtowerInstances: list every
-// container carrying the io.repull.app label, sort by creation time, and
-// force-remove all but the most recently created one (the running self).
+// A leftover is identified by the rename pattern self-update produces
+// ("<name>-old-<its own short ID>"), not by the io.repull.app label alone.
+// Docker merges image labels into container labels, so trusting the label
+// would let any third-party image carrying io.repull.app=true get unrelated
+// containers force-removed here — including, if it sorted newer, repull
+// itself. The rename suffix embeds the container's own ID, which an image
+// label cannot forge. The label filter remains as a cheap server-side
+// pre-filter only.
 //
 // Returns the names of containers that were removed.
 func CleanupSelfUpdateLeftovers(ctx context.Context, cli *client.Client) ([]string, error) {
@@ -153,19 +159,21 @@ func CleanupSelfUpdateLeftovers(ctx context.Context, cli *client.Client) ([]stri
 		return nil, fmt.Errorf("failed to list repull containers: %w", err)
 	}
 
-	if len(containers) <= 1 {
-		return nil, nil
-	}
-
-	sort.Slice(containers, func(i, j int) bool {
-		return containers[i].Created < containers[j].Created
-	})
+	// Inside a container the hostname defaults to the short container ID;
+	// used below to make sure this process's own container is never removed.
+	hostname, _ := os.Hostname()
 
 	var removed []string
-	for _, c := range containers[:len(containers)-1] {
+	for _, c := range containers {
 		name := ""
 		if len(c.Names) > 0 {
 			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		if hostname != "" && (strings.HasPrefix(c.ID, hostname) || name == hostname) {
+			continue
+		}
+		if !isSelfUpdateLeftover(name, c.ID) {
+			continue
 		}
 		if err := cli.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
 			continue
@@ -173,6 +181,16 @@ func CleanupSelfUpdateLeftovers(ctx context.Context, cli *client.Client) ([]stri
 		removed = append(removed, name)
 	}
 	return removed, nil
+}
+
+// isSelfUpdateLeftover reports whether a container is the remnant of a
+// previous self-update: its name ends in the "-old-<short ID>" suffix that
+// updateRepullInstance appends on rename, where the short ID is the
+// container's own. A name that is only the suffix (empty original name)
+// does not count.
+func isSelfUpdateLeftover(name, id string) bool {
+	suffix := "-old-" + ShortID(id)
+	return len(name) > len(suffix) && strings.HasSuffix(name, suffix)
 }
 
 // ListRunningContainers returns all currently running containers.

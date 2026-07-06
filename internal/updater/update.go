@@ -13,7 +13,16 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/fanuelsen/repull/internal/docker"
 	"github.com/fanuelsen/repull/internal/notify"
+	sanitizepkg "github.com/fanuelsen/repull/internal/sanitize"
 )
+
+// sanitize neutralizes control and spoofing characters in strings derived
+// from external sources (container names, image names, compose labels, error
+// text) before logging. Notifications are additionally sanitized at the sink
+// in notify.
+func sanitize(s string) string {
+	return sanitizepkg.String(s)
+}
 
 // groupTimeout bounds the work for a single group: pulling the image and
 // recreating its containers. Generous enough for large images on slow links.
@@ -43,11 +52,14 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 		err := updateGroup(groupCtx, cli, groupKey, containers, dryRun, cleanup, notifier, recreated)
 		cancel()
 		if err != nil {
-			log.Printf("[ERROR] %s: %v — continuing with remaining groups", sanitize(groupKey), err)
-			// Sanitize here too: this error is logged by main without further
-			// escaping, so a crafted compose project name must not be able to
-			// inject log lines through it.
-			errs = append(errs, fmt.Errorf("%s: %w", sanitize(groupKey), err))
+			// Sanitize the error text as well as the group key: pull errors can
+			// echo registry-controlled response bodies, and this error is logged
+			// both here and by main without further escaping. Flattening %w to
+			// %s loses errors.Is/As matching, which nothing relies on — the
+			// joined error is only ever logged.
+			errText := sanitize(err.Error())
+			log.Printf("[ERROR] %s: %s — continuing with remaining groups", sanitize(groupKey), errText)
+			errs = append(errs, fmt.Errorf("%s: %s", sanitize(groupKey), errText))
 		}
 	}
 
@@ -183,7 +195,7 @@ func updateGroup(ctx context.Context, cli *client.Client, groupKey string, conta
 // repull instance it returns normally and the caller continues.
 func updateRepullInstance(ctx context.Context, cli *client.Client, c container.InspectResponse, containerName, groupKey, imageName, oldID, latestID string, notifier *notify.Notifier) error {
 	hostname, _ := os.Hostname()
-	self := isSelfContainer(c, hostname)
+	self := runningInContainer() && isSelfContainer(c, hostname)
 	if self {
 		log.Printf("[INFO] Self-update detected for %s", sanitize(containerName))
 	} else {
@@ -250,19 +262,6 @@ func truncateDigest(digest string) string {
 	return digest
 }
 
-// sanitize replaces control characters (newlines, ANSI escapes, etc.) in strings
-// derived from external sources — container names, image names, compose labels —
-// before they are written to logs or sent as notifications. This prevents log
-// injection via crafted container names.
-func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 32 || r == 127 {
-			return '·'
-		}
-		return r
-	}, s)
-}
-
 // isRepullInstance checks if the given container has the io.repull.app label,
 // which is baked into the repull Docker image. This is the same approach
 // Watchtower uses (com.centurylinklabs.watchtower label). It matches any
@@ -275,11 +274,28 @@ func isRepullInstance(c container.InspectResponse) bool {
 	return c.Config.Labels["io.repull.app"] == "true"
 }
 
+// runningInContainer reports whether this process runs inside a container:
+// Docker creates /.dockerenv in every container, Podman /run/.containerenv.
+// Self-update must never trigger for a host binary — isSelfContainer matches
+// by hostname, and a container that happens to be named like the machine's
+// hostname would otherwise end with os.Exit(0) killing the host process,
+// which (unlike a container) nothing restarts.
+func runningInContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		return true
+	}
+	return false
+}
+
 // isSelfContainer reports whether the given container is the one this process
 // is running in. Inside a container the hostname defaults to the short
 // container ID; if the user set a custom hostname, fall back to matching it
-// against the container name. When repull runs as a plain host binary neither
-// matches, so other repull containers are correctly treated as not-self.
+// against the container name. Callers must additionally gate on
+// runningInContainer — for a plain host binary the hostname is the machine
+// name, which a container name could collide with.
 func isSelfContainer(c container.InspectResponse, hostname string) bool {
 	if hostname == "" {
 		return false

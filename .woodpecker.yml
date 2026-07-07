@@ -1,7 +1,7 @@
 steps:
   # Step 1: Run tests
   test:
-    image: golang:1.26.4-alpine
+    image: golang:1.26.5-alpine
     commands:
       - go test -v ./...
     when:
@@ -12,7 +12,7 @@ steps:
 
   # Step 2: Security audit
   security:
-    image: golang:1.26.4-alpine
+    image: golang:1.26.5-alpine
     commands:
       # Pinned instead of @latest so a compromised release can't silently run
       # in CI; the renovate comment keeps the pin current (customManagers in
@@ -50,7 +50,7 @@ steps:
 
   # Step 3: Build binary
   build:
-    image: golang:1.26.4-alpine
+    image: golang:1.26.5-alpine
     commands:
       - apk add --no-cache git
       - go build -ldflags="-s -w -X main.version=${CI_COMMIT_TAG:-dev}" -trimpath -o repull ./cmd/repull

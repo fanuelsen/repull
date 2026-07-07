@@ -1,6 +1,6 @@
 module github.com/fanuelsen/repull
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/distribution/reference v0.6.0

@@ -5,6 +5,11 @@
 
   "packageRules": [
     {
+      "description": "Pin Docker images by digest (tag kept for readability); updates bump tag and digest together",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
       "description": "Use bump strategy for Go toolchain version in go.mod",
       "matchManagers": ["gomod"],
       "matchDepNames": ["go"],

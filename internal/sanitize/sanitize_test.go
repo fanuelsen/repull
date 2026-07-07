@@ -23,6 +23,9 @@ func TestString(t *testing.T) {
 		{name: "paragraph separator", in: wrap(0x2029), want: "a·b"},
 		{name: "bidi RLO override", in: wrap(0x202E), want: "a·b"},
 		{name: "bidi LRI isolate", in: wrap(0x2066), want: "a·b"},
+		{name: "bidi LRM mark", in: wrap(0x200E), want: "a·b"},
+		{name: "bidi RLM mark", in: wrap(0x200F), want: "a·b"},
+		{name: "bidi ALM mark", in: wrap(0x061C), want: "a·b"},
 		{name: "empty", in: "", want: ""},
 	}
 

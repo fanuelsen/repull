@@ -96,6 +96,99 @@ func TestIsSelfUpdateLeftover(t *testing.T) {
 	}
 }
 
+// TestLooksLikeContainerID verifies the guard that decides whether a
+// network_mode ref may be prefix-matched against container IDs. Short hex-like
+// names ("db", "cafe") must be treated as names: prefix-matching them against
+// IDs could rewire a container into an unrelated network namespace.
+func TestLooksLikeContainerID(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{ref: "abcdef123456", want: true}, // short ID
+		{ref: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", want: true}, // full ID
+		{ref: "db", want: false},              // hex-like name, too short
+		{ref: "cafe", want: false},            // hex-like name, too short
+		{ref: "my-service-name", want: false}, // name with non-hex chars
+		{ref: "abcdef12345", want: false},     // 11 chars, below short-ID length
+		{ref: "ABCDEF123456", want: false},    // uppercase is not an ID
+		{ref: "abcdef12345g", want: false},    // non-hex char
+		{ref: "", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := looksLikeContainerID(tt.ref); got != tt.want {
+			t.Errorf("looksLikeContainerID(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+}
+
+// TestContainerOnlyLabels verifies that labels inherited unchanged from the
+// image are dropped (so the new image's labels apply fresh), while labels the
+// user set on the container — including overrides of image labels — are kept.
+func TestContainerOnlyLabels(t *testing.T) {
+	merged := map[string]string{
+		"io.repull.enable":           "true",  // baked into the image
+		"com.docker.compose.project": "myapp", // set by compose
+		"maintainer":                 "me",    // container overrides image value
+	}
+	image := map[string]string{
+		"io.repull.enable": "true",
+		"maintainer":       "upstream",
+	}
+
+	got := containerOnlyLabels(merged, image)
+
+	if _, ok := got["io.repull.enable"]; ok {
+		t.Errorf("image-inherited label not dropped: %v", got)
+	}
+	if got["com.docker.compose.project"] != "myapp" {
+		t.Errorf("container-set label lost: %v", got)
+	}
+	if got["maintainer"] != "me" {
+		t.Errorf("container override of image label lost: %v", got)
+	}
+
+	// Nil/empty image labels: merged map returned unchanged.
+	if got := containerOnlyLabels(merged, nil); len(got) != len(merged) {
+		t.Errorf("with nil image labels got %v, want all of %v", got, merged)
+	}
+}
+
+// TestContainerOnlyEnv verifies that env entries inherited unchanged from the
+// image are dropped, while container-set entries (new vars, or overrides with
+// a different value) are kept.
+func TestContainerOnlyEnv(t *testing.T) {
+	merged := []string{
+		"PATH=/usr/local/bin:/usr/bin", // from the image
+		"APP_VERSION=1.2.3",            // from the image
+		"DB_HOST=db",                   // set on the container
+		"LOG_LEVEL=debug",              // overrides the image's value
+	}
+	image := []string{
+		"PATH=/usr/local/bin:/usr/bin",
+		"APP_VERSION=1.2.3",
+		"LOG_LEVEL=info",
+	}
+
+	got := containerOnlyEnv(merged, image)
+
+	want := []string{"DB_HOST=db", "LOG_LEVEL=debug"}
+	if len(got) != len(want) {
+		t.Fatalf("containerOnlyEnv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("containerOnlyEnv[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Nil/empty image env: merged returned unchanged.
+	if got := containerOnlyEnv(merged, nil); len(got) != len(merged) {
+		t.Errorf("with nil image env got %v, want all of %v", got, merged)
+	}
+}
+
 func TestSanitizeEndpoint(t *testing.T) {
 	oldContainerID := "abcdef123456789012345678901234567890"
 	oldShort := ShortID(oldContainerID)

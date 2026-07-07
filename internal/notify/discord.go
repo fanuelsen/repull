@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fanuelsen/repull/internal/sanitize"
 )
@@ -73,7 +74,12 @@ func (n *Notifier) SendError(service, errorMsg string) {
 
 	const maxLen = 200
 	if len(errorMsg) > maxLen {
-		errorMsg = errorMsg[:maxLen] + "..."
+		// Back up to a rune boundary so the cut never splits a UTF-8 sequence.
+		cut := maxLen
+		for cut > 0 && !utf8.RuneStart(errorMsg[cut]) {
+			cut--
+		}
+		errorMsg = errorMsg[:cut] + "..."
 	}
 
 	n.send(fmt.Sprintf("❌ Failed to update %s\nError: %s", service, errorMsg))

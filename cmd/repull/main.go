@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/client"
@@ -15,6 +17,11 @@ import (
 	"github.com/fanuelsen/repull/internal/notify"
 	"github.com/fanuelsen/repull/internal/updater"
 )
+
+// maxIntervalSeconds caps --interval at one year. Beyond any sane polling
+// cadence, and keeps the time.Duration multiplication far from int64
+// overflow, which would produce a negative duration and panic the ticker.
+const maxIntervalSeconds = 365 * 24 * 60 * 60
 
 // version is set at build time via -ldflags.
 var version = "dev"
@@ -75,6 +82,9 @@ func main() {
 	if *interval != 0 && *interval < 60 {
 		log.Fatal("[ERROR] --interval must be at least 60 seconds (or 0 for a single run)")
 	}
+	if *interval > maxIntervalSeconds {
+		log.Fatal("[ERROR] --interval must be at most one year (31536000 seconds)")
+	}
 
 	// Validate the schedule up front so a typo fails fast, before any Docker
 	// connection or leftover cleanup happens.
@@ -88,6 +98,14 @@ func main() {
 	}
 
 	log.Printf("[INFO] Repull %s starting...", version)
+
+	// Cancel the root context on SIGTERM/SIGINT (docker stop, Ctrl+C) so an
+	// in-flight cycle stops between groups and rollback paths (which run on
+	// detached contexts) can finish, instead of the process dying mid-update —
+	// possibly between "old container stopped and renamed" and "new container
+	// started", which would leave the service down.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
 	// Set DOCKER_HOST if provided via flag
 	if *dockerHost != "" {
@@ -105,7 +123,7 @@ func main() {
 
 	// Remove containers left behind by a previous self-update.
 	if !*dryRun {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
 		removed, cleanupErr := docker.CleanupSelfUpdateLeftovers(cleanupCtx, cli)
 		cleanupCancel()
 		if cleanupErr != nil {
@@ -134,13 +152,13 @@ func main() {
 	// Run based on mode
 	if *schedule != "" {
 		log.Printf("[INFO] Running in schedule mode (daily at %s)", *schedule)
-		runSchedule(cli, notifier, targetTime)
+		runSchedule(ctx, cli, notifier, targetTime)
 	} else if *interval > 0 {
 		log.Printf("[INFO] Running in loop mode (interval: %d seconds)", *interval)
-		runLoop(cli, notifier)
+		runLoop(ctx, cli, notifier)
 	} else {
 		log.Println("[INFO] Running in single-run mode")
-		if err := runOnce(cli, notifier); err != nil {
+		if err := runOnce(ctx, cli, notifier); err != nil {
 			log.Fatalf("[ERROR] Update failed: %v", err)
 		}
 		log.Println("[INFO] Update complete")
@@ -148,16 +166,16 @@ func main() {
 }
 
 // runOnce performs a single update check and execution.
-func runOnce(cli *client.Client, notifier *notify.Notifier) error {
+func runOnce(ctx context.Context, cli *client.Client, notifier *notify.Notifier) error {
 	// Listing and inspecting containers is fast; a short deadline prevents a
 	// stalled Docker daemon from blocking the loop indefinitely. The update
 	// work itself is bounded per group inside UpdateGroups, so one slow group
 	// cannot eat the time budget of the others.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	listCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	// List running containers
-	containers, err := docker.ListRunningContainers(ctx, cli)
+	containers, err := docker.ListRunningContainers(listCtx, cli)
 	if err != nil {
 		return err
 	}
@@ -173,47 +191,60 @@ func runOnce(cli *client.Client, notifier *notify.Notifier) error {
 		return nil
 	}
 
+	// Surface opt-ins that come from an image's own labels rather than the
+	// operator (Docker merges image labels into container labels).
+	updater.WarnImageProvidedOptIns(listCtx, cli, optedIn)
+
 	// Group by compose service
 	groups := updater.GroupByComposeService(optedIn)
 	log.Printf("[INFO] Grouped into %d service(s)", len(groups))
 
 	// Update groups. Deliberately not bound to the listing deadline above —
-	// UpdateGroups applies its own per-group timeout.
-	return updater.UpdateGroups(context.Background(), cli, groups, *dryRun, *cleanup, notifier)
+	// UpdateGroups applies its own per-group timeout. The root context still
+	// flows through so a shutdown signal stops the cycle between groups.
+	return updater.UpdateGroups(ctx, cli, groups, *dryRun, *cleanup, notifier)
 }
 
-// runLoop runs the update check in a loop at the specified interval.
-func runLoop(cli *client.Client, notifier *notify.Notifier) {
+// runLoop runs the update check in a loop at the specified interval until the
+// context is canceled.
+func runLoop(ctx context.Context, cli *client.Client, notifier *notify.Notifier) {
 	ticker := time.NewTicker(time.Duration(*interval) * time.Second)
 	defer ticker.Stop()
 
 	// Run immediately on start
 	log.Println("[INFO] Running initial check...")
-	if err := runOnce(cli, notifier); err != nil {
+	if err := runOnce(ctx, cli, notifier); err != nil {
 		log.Printf("[ERROR] Update failed: %v", err)
 	}
 
 	// Then run on interval
-	for range ticker.C {
-		log.Printf("[INFO] Running scheduled check (interval: %d seconds)...", *interval)
-		if err := runOnce(cli, notifier); err != nil {
-			log.Printf("[ERROR] Update failed: %v", err)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[INFO] Received shutdown signal, exiting")
+			return
+		case <-ticker.C:
+			log.Printf("[INFO] Running scheduled check (interval: %d seconds)...", *interval)
+			if err := runOnce(ctx, cli, notifier); err != nil {
+				log.Printf("[ERROR] Update failed: %v", err)
+			}
+			log.Println("[INFO] Check complete, waiting for next interval...")
 		}
-		log.Println("[INFO] Check complete, waiting for next interval...")
 	}
 }
 
-// runSchedule runs the update check daily at targetTime's wall-clock time.
-func runSchedule(cli *client.Client, notifier *notify.Notifier, targetTime time.Time) {
+// runSchedule runs the update check daily at targetTime's wall-clock time
+// until the context is canceled.
+func runSchedule(ctx context.Context, cli *client.Client, notifier *notify.Notifier, targetTime time.Time) {
 	for {
 		// Calculate time until next occurrence
 		next := nextOccurrence(targetTime, time.Now())
 
 		log.Printf("[INFO] Next run scheduled at %s (in %s)", next.Format("2006-01-02 15:04:05"), time.Until(next).Round(time.Second))
 
-		// Sleep in short chunks and re-check the wall clock. time.Sleep uses
-		// the monotonic clock, so a single long sleep overshoots the target
-		// when the machine suspends or the clock is adjusted; chunked sleeping
+		// Sleep in short chunks and re-check the wall clock. Timers use the
+		// monotonic clock, so a single long sleep overshoots the target when
+		// the machine suspends or the clock is adjusted; chunked sleeping
 		// keeps the run within a minute of the scheduled wall-clock time.
 		for {
 			remaining := time.Until(next)
@@ -223,12 +254,17 @@ func runSchedule(cli *client.Client, notifier *notify.Notifier, targetTime time.
 			if remaining > time.Minute {
 				remaining = time.Minute
 			}
-			time.Sleep(remaining)
+			select {
+			case <-ctx.Done():
+				log.Println("[INFO] Received shutdown signal, exiting")
+				return
+			case <-time.After(remaining):
+			}
 		}
 
 		// Run update
 		log.Printf("[INFO] Running scheduled check...")
-		if err := runOnce(cli, notifier); err != nil {
+		if err := runOnce(ctx, cli, notifier); err != nil {
 			log.Printf("[ERROR] Update failed: %v", err)
 		}
 		log.Println("[INFO] Check complete")

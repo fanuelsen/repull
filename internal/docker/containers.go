@@ -38,6 +38,22 @@ func ShortID(id string) string {
 	return id
 }
 
+// looksLikeContainerID reports whether ref is shaped like a container ID: 12
+// (short) to 64 (full) lowercase hex characters. Used to decide whether a
+// network_mode reference may be prefix-matched against container IDs; shorter
+// or non-hex refs are container names and must only match exactly.
+func looksLikeContainerID(ref string) bool {
+	if len(ref) < 12 || len(ref) > 64 {
+		return false
+	}
+	for _, r := range ref {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveNetworkMode checks if the network mode references another container
 // and resolves it to the current container ID. This handles the case where
 // Docker Compose translates "network_mode: service:name" to "container:<id>"
@@ -59,10 +75,16 @@ func resolveNetworkMode(ctx context.Context, cli *client.Client, mode container.
 		if newID, ok := recreated[ref]; ok {
 			return container.NetworkMode("container:" + newID)
 		}
-		// Also check partial ID matches (Docker often uses short IDs)
-		for oldID, newID := range recreated {
-			if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, ShortID(oldID)) {
-				return container.NetworkMode("container:" + newID)
+		// Also check partial ID matches (Docker often uses short IDs) — but
+		// only when the ref actually looks like an ID. Container names may be
+		// valid hex too ("db", "cafe"), and prefix-matching a short name
+		// against IDs could rewire the container into an unrelated
+		// container's network namespace.
+		if looksLikeContainerID(ref) {
+			for oldID, newID := range recreated {
+				if strings.HasPrefix(oldID, ref) || strings.HasPrefix(ref, ShortID(oldID)) {
+					return container.NetworkMode("container:" + newID)
+				}
 			}
 		}
 	}
@@ -125,7 +147,10 @@ func FindNetworkDependents(ctx context.Context, cli *client.Client, containerID 
 			continue
 		}
 		ref := strings.TrimPrefix(mode, "container:")
-		if ref == containerID || strings.HasPrefix(containerID, ref) || strings.HasPrefix(ref, short) {
+		// Prefix comparisons only apply to ID-shaped refs: a name-shaped ref
+		// that happens to be a hex prefix of this container's ID (e.g. "db")
+		// must not mark an unrelated container as a dependent.
+		if ref == containerID || (looksLikeContainerID(ref) && (strings.HasPrefix(containerID, ref) || strings.HasPrefix(ref, short))) {
 			dependents = append(dependents, inspect)
 		}
 	}
@@ -289,6 +314,49 @@ func recreatePortConfig(cfg *container.Config, host *container.HostConfig) (nat.
 	return exposed, bindings, host.PublishAllPorts
 }
 
+// containerOnlyLabels returns the labels a container was given at creation,
+// dropping those it inherited unchanged from its image. Docker merges image
+// labels into the container config at create time; copying the merged map
+// onto a new container would freeze the old image's labels as container-level
+// settings, permanently overriding whatever the new image ships — including
+// an io.repull.enable opt-in the new image no longer carries. Labels the user
+// set (absent from the image, or overriding it with a different value) are kept.
+func containerOnlyLabels(merged, imageLabels map[string]string) map[string]string {
+	if len(merged) == 0 || len(imageLabels) == 0 {
+		return merged
+	}
+	out := make(map[string]string, len(merged))
+	for k, v := range merged {
+		if iv, ok := imageLabels[k]; ok && iv == v {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// containerOnlyEnv returns the env entries a container was given at creation,
+// dropping those it inherited unchanged from its image — same rationale as
+// containerOnlyLabels: the new image's own ENV defaults (PATH, version
+// variables) must apply to the new container instead of the old image's.
+func containerOnlyEnv(merged, imageEnv []string) []string {
+	if len(merged) == 0 || len(imageEnv) == 0 {
+		return merged
+	}
+	fromImage := make(map[string]struct{}, len(imageEnv))
+	for _, e := range imageEnv {
+		fromImage[e] = struct{}{}
+	}
+	var out []string
+	for _, e := range merged {
+		if _, ok := fromImage[e]; ok {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // buildContainerConfigs extracts the container, host, and network configs from
 // an existing container's inspect response. This is used by both RecreateContainer
 // and CreateAndStartContainer to avoid duplicating the config-building logic.
@@ -311,12 +379,26 @@ func buildContainerConfigs(ctx context.Context, cli *client.Client, old containe
 
 	exposedPorts, portBindings, publishAllPorts := recreatePortConfig(oldConfig, oldHost)
 
+	// Strip labels and env inherited unchanged from the old image, so the new
+	// image's own values apply to the new container. Inspect by image ID
+	// (old.Image), not tag: after the pull the tag already points at the new
+	// image. If the old image can't be inspected, fall back to copying the
+	// merged values — recreating with frozen config beats failing the update.
+	labels := oldConfig.Labels
+	env := oldConfig.Env
+	if img, err := cli.ImageInspect(ctx, old.Image); err == nil && img.Config != nil {
+		labels = containerOnlyLabels(labels, img.Config.Labels)
+		env = containerOnlyEnv(env, img.Config.Env)
+	} else if err != nil {
+		log.Printf("[WARN] Could not inspect image of %s; recreating with merged image+container config: %v", ShortID(old.ID), err)
+	}
+
 	config := &container.Config{
 		Image:        oldConfig.Image,
 		Cmd:          oldConfig.Cmd,
 		Entrypoint:   oldConfig.Entrypoint,
-		Env:          oldConfig.Env,
-		Labels:       oldConfig.Labels,
+		Env:          env,
+		Labels:       labels,
 		ExposedPorts: exposedPorts,
 		WorkingDir:   oldConfig.WorkingDir,
 		User:         oldConfig.User,

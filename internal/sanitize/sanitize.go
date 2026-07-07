@@ -13,9 +13,9 @@ import "strings"
 //     7-bit ESC (0x1B) is filtered
 //   - U+2028/U+2029 line and paragraph separators, which some log viewers
 //     render as line breaks (log-line injection)
-//   - bidirectional embedding/override (U+202A–U+202E) and isolate
-//     (U+2066–U+2069) characters, which can visually reorder log content
-//     (spoofing)
+//   - bidirectional embedding/override (U+202A–U+202E), isolate
+//     (U+2066–U+2069), and implicit mark (U+200E/U+200F LRM/RLM, U+061C ALM)
+//     characters, which can visually reorder log content (spoofing)
 func String(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -26,6 +26,8 @@ func String(s string) string {
 		case r >= 0x202A && r <= 0x202E: // bidi embedding/override
 			return '·'
 		case r >= 0x2066 && r <= 0x2069: // bidi isolates
+			return '·'
+		case r == 0x200E || r == 0x200F || r == 0x061C: // implicit bidi marks
 			return '·'
 		}
 		return r

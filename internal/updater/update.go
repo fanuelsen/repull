@@ -28,6 +28,45 @@ func sanitize(s string) string {
 // recreating its containers. Generous enough for large images on slow links.
 const groupTimeout = 10 * time.Minute
 
+// checkedOptInImages tracks image IDs already checked for an image-provided
+// opt-in label, so each image is inspected and warned about once per image
+// version, not once per cycle. Only accessed from the single update goroutine.
+var checkedOptInImages = make(map[string]bool)
+
+// WarnImageProvidedOptIns logs a warning for each opted-in container whose
+// io.repull.enable=true label is defined by the image itself. Docker merges
+// image labels into container labels, so an image shipping the label enrolls
+// its own containers in auto-updates — meaning the image author, not the
+// operator, decided that future pushes of the tag get deployed automatically.
+// The opt-in still stands (the merged label may equally have been set by the
+// operator; the two are indistinguishable), but it must not happen silently.
+func WarnImageProvidedOptIns(ctx context.Context, cli *client.Client, containers []container.InspectResponse) {
+	for _, c := range containers {
+		if checkedOptInImages[c.Image] {
+			continue
+		}
+		labels, err := docker.GetImageConfigLabels(ctx, cli, c.Image)
+		if err != nil {
+			// Transient inspect failure: retry on the next cycle.
+			continue
+		}
+		checkedOptInImages[c.Image] = true
+		if labels[EnableLabel] == "true" {
+			log.Printf("[WARN] Image %s sets %s=true in its own labels: the image author has opted containers using it into auto-updates. If that is not intended, override the label on the container (e.g. %s=false) or stop using the image.",
+				sanitize(imageNameOf(c)), EnableLabel, EnableLabel)
+		}
+	}
+}
+
+// imageNameOf returns the container's image reference for display, falling
+// back to the image ID when the config is missing.
+func imageNameOf(c container.InspectResponse) string {
+	if c.Config != nil && c.Config.Image != "" {
+		return c.Config.Image
+	}
+	return truncateDigest(c.Image)
+}
+
 // UpdateGroups processes each group of containers and updates them if they are
 // running an outdated image. It updates one group at a time (sequential, not
 // parallel) for safety. Groups are independent: a failure in one group is
@@ -42,6 +81,13 @@ func UpdateGroups(ctx context.Context, cli *client.Client, groups map[string][]c
 
 	var errs []error
 	for groupKey, containers := range groups {
+		// Stop between groups on shutdown: in-flight work is bounded by the
+		// group context, and rollbacks run on detached contexts, so breaking
+		// here is always safe.
+		if ctx.Err() != nil {
+			log.Println("[INFO] Shutdown requested, skipping remaining groups")
+			break
+		}
 		if len(containers) == 0 {
 			continue
 		}
@@ -234,13 +280,19 @@ func updateRepullInstance(ctx context.Context, cli *client.Client, c container.I
 	// restart: unless-stopped does not restart it. A bare os.Exit(0) is treated
 	// by Docker as an unexpected exit, which triggers the restart policy.
 	// ContainerStop marks the container as explicitly stopped, preventing that.
-	// If the old container is this process, timeout=0 makes Docker SIGKILL us
-	// here; execution past this point means it was another instance (or the
-	// stop failed). Uses a detached context so the stop still goes through
-	// if the update's context has expired.
+	// For a self-update, timeout=0 makes Docker SIGKILL us here — this process
+	// cannot outlive the stop anyway, and execution past this point means the
+	// stop failed. Another repull instance gets a normal graceful stop instead:
+	// it may be mid-cycle, and killing it instantly could interrupt its own
+	// update work. Uses a detached context so the stop still goes through if
+	// the update's context has expired.
 	stopCtx, cancel := docker.RollbackContext(ctx)
-	stopTimeout := 0
-	if err := cli.ContainerStop(stopCtx, c.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+	stopOpts := container.StopOptions{}
+	if self {
+		stopTimeout := 0
+		stopOpts.Timeout = &stopTimeout
+	}
+	if err := cli.ContainerStop(stopCtx, c.ID, stopOpts); err != nil {
 		log.Printf("[WARN] Failed to stop old container: %v", err)
 	}
 	cancel()

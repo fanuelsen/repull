@@ -2,10 +2,14 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/jsonmessage"
 )
 
 // PullImage pulls the latest version of an image from the registry.
@@ -21,9 +25,25 @@ func PullImage(ctx context.Context, cli *client.Client, imageName string) error 
 	}
 	defer reader.Close()
 
-	// Consume the output to ensure pull completes
-	_, err = io.Copy(io.Discard, reader)
-	return err
+	// The pull must be consumed to completion, and the stream must be decoded
+	// rather than discarded: the daemon reports many failures (rejected
+	// credentials, layer download errors) as in-stream JSON error messages
+	// with no error on the HTTP call itself. Discarding them would make a
+	// failed pull look successful — the tag stays on the old image and the
+	// cycle reports "already up to date" instead of the real failure.
+	dec := json.NewDecoder(reader)
+	for {
+		var msg jsonmessage.JSONMessage
+		if err := dec.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("reading pull progress: %w", err)
+		}
+		if msg.Error != nil {
+			return fmt.Errorf("pull failed: %s", msg.Error.Message)
+		}
+	}
 }
 
 // GetImageID returns the image ID (sha256:...) that the given image name
@@ -37,6 +57,21 @@ func GetImageID(ctx context.Context, cli *client.Client, imageName string) (stri
 		return "", err
 	}
 	return inspect.ID, nil
+}
+
+// GetImageConfigLabels returns the labels the image itself defines (its
+// build-time LABELs), as opposed to labels set on a container at creation.
+// Docker merges the former into the latter, so this is the only way to tell
+// where a container's label came from.
+func GetImageConfigLabels(ctx context.Context, cli *client.Client, imageRef string) (map[string]string, error) {
+	inspect, err := cli.ImageInspect(ctx, imageRef)
+	if err != nil {
+		return nil, err
+	}
+	if inspect.Config == nil {
+		return nil, nil
+	}
+	return inspect.Config.Labels, nil
 }
 
 // RemoveImage removes an image by ID. Used to clean up replaced images after

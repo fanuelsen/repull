@@ -12,10 +12,16 @@
       "rangeStrategy": "bump"
     },
     {
+      "description": "Indirect go.mod deps are skipped by default; enable them so vulnerable transitive deps get bumped too",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "enabled": true
+    },
+    {
       "description": "Group Go toolchain (go.mod) and golang Docker image into one PR",
       "matchDepNames": ["go", "golang"],
-      "groupName": "Go toolchain",
-      "groupSlug": "go-toolchain"
+      "groupName": "Go",
+      "groupSlug": "go"
     },
     {
       "description": "Auto-merge minor and patch Go toolchain updates",
@@ -58,12 +64,31 @@
       "labels": ["dependencies", "major-update"]
     },
     {
-      "description": "Group all Go dependency updates into single PR",
+      "description": "Same group as the toolchain: govulncheck in CI fails on any fixable vuln, so separate toolchain and module PRs can block each other",
       "matchDatasources": ["go"],
-      "groupName": "Go dependencies",
-      "groupSlug": "go-deps"
+      "groupName": "Go",
+      "groupSlug": "go"
+    },
+    {
+      "description": "GitHub Actions in the mirrored release workflow: one weekly PR, auto-merge everything but majors",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "groupSlug": "github-actions",
+      "schedule": ["* 0-5 * * 1"]
+    },
+    {
+      "description": "Woodpecker doesn't run the GitHub workflow, so CI can't catch a broken action; digest/minor/patch within a pinned major is low risk",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest", "pin", "pinDigest", "minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
     }
   ],
+
+  "timezone": "Europe/Oslo",
+
+  "postUpdateOptions": ["gomodTidy"],
 
   "customManagers": [
     {

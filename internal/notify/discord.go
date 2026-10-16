@@ -97,7 +97,9 @@ func (n *Notifier) send(content string) {
 
 	resp, err := httpClient.Post(n.webhookURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {
-		log.Printf("[WARN] Discord notification failed: %v", err)
+		// HTTP errors can contain the full webhook URL, including its secret
+		// token. Avoid logging their text, including nested transport errors.
+		log.Println("[WARN] Discord notification failed: request failed; check connectivity and webhook configuration")
 		return
 	}
 	defer resp.Body.Close()

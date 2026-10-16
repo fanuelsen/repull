@@ -532,6 +532,8 @@ func createAndConnectNetworks(ctx context.Context, cli *client.Client, cc contai
 // Uses a rename-based approach to avoid data loss: the old container is stopped
 // and renamed (not removed) before creating the new one. If creation fails, the
 // old container is renamed back and restarted as a rollback.
+// AutoRemove containers are instead recreated after Docker removes the old
+// container on exit; the removed container cannot be used for rollback.
 //
 // The recreated parameter contains a mapping of old container IDs to new IDs
 // for containers that were recreated earlier in the current update cycle.
@@ -539,13 +541,41 @@ func createAndConnectNetworks(ctx context.Context, cli *client.Client, cc contai
 func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer container.InspectResponse, recreated RecreatedContainers) (string, error) {
 	oldID := oldContainer.ID
 	oldName := oldContainer.Name
+	autoRemove := oldContainer.HostConfig != nil && oldContainer.HostConfig.AutoRemove
+
+	// Capture the replacement config before stopping: an AutoRemove container
+	// and its anonymous volumes disappear on exit.
+	cc := buildContainerConfigs(ctx, cli, oldContainer, recreated)
 
 	// Stop the old container. A nil timeout lets Docker use the container's
 	// own StopTimeout (compose stop_grace_period) or the daemon default of
 	// 10s — a hardcoded value here would cut short containers that declare
 	// they need longer to shut down cleanly (e.g. databases).
-	if err := cli.ContainerStop(ctx, oldID, container.StopOptions{}); err != nil {
+	if err := cli.ContainerStop(ctx, oldID, container.StopOptions{}); err != nil && !(autoRemove && client.IsErrNotFound(err)) {
 		return "", fmt.Errorf("failed to stop container %s: %w", oldID, err)
+	}
+
+	if autoRemove {
+		// Stopping and removal are separate events. Wait until Docker has
+		// released the old name before trying to create its replacement.
+		// A 404 means removal already finished before the wait request.
+		resultC, errC := cli.ContainerWait(ctx, oldID, container.WaitConditionRemoved)
+		select {
+		case result := <-resultC:
+			if result.Error != nil {
+				return "", fmt.Errorf("failed to wait for auto-remove container %s: %s", oldID, result.Error.Message)
+			}
+		case err := <-errC:
+			if !client.IsErrNotFound(err) {
+				return "", fmt.Errorf("failed to wait for auto-remove container %s: %w", oldID, err)
+			}
+		}
+
+		newID, err := createAndConnectNetworks(ctx, cli, cc, oldName)
+		if err != nil {
+			return "", fmt.Errorf("failed to replace auto-remove container %s (original removed; rollback unavailable): %w", oldID, err)
+		}
+		return newID, nil
 	}
 
 	// Rename old container to free up the name for the new one.
@@ -558,8 +588,6 @@ func RecreateContainer(ctx context.Context, cli *client.Client, oldContainer con
 		cli.ContainerStart(rbCtx, oldID, container.StartOptions{})
 		return "", fmt.Errorf("failed to rename container %s: %w", oldID, err)
 	}
-
-	cc := buildContainerConfigs(ctx, cli, oldContainer, recreated)
 
 	newID, err := createAndConnectNetworks(ctx, cli, cc, oldName)
 	if err != nil {

@@ -151,6 +151,8 @@ repull --interval 300 --cleanup
 5. Compares each container's image ID against the freshly pulled image
 6. Recreates containers running an outdated image (preserving all config)
 
+Containers created with `--rm` are recreated after Docker finishes removing the old container. Docker's normal cleanup of anonymous volumes still applies. If creating or starting the replacement fails, the removed container is no longer available for rollback.
+
 ## Trust Model
 
 - Repull runs whatever the tag points to at pull time. There is no digest pinning or signature verification — labeling a container extends full trust to its image publisher and registry, and a compromised upstream image is deployed automatically within one interval. Only label images you would also update by hand without inspecting.

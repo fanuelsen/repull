@@ -132,7 +132,7 @@ steps:
   # the digest is what the daemon verifies. Renovate maintains both
   # (pinDigests in renovate.json).
   docker-release:
-    image: woodpeckerci/plugin-docker-buildx:6.1.0@sha256:33263f74a593ddef5d4faeb39ae9f87db14d64d8aae8186284ae6e90d89298a4
+    image: woodpeckerci/plugin-docker-buildx:6.1.2@sha256:d26b69cbe748b8a219c707e7889d5ffb3f9214bc3c480c30fe857ff85954267c
     settings:
       repo: fanuelsen/repull
       dockerfile: Dockerfile

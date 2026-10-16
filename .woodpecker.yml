@@ -58,7 +58,7 @@ steps:
   # deliberately not scanned here — govulncheck above already covers them,
   # call-graph-aware.
   trivy:
-    image: aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+    image: aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
     commands:
       - BASE=$$(grep '^FROM' Dockerfile | tail -n1 | cut -d' ' -f2)
       - echo "Scanning runtime base image $${BASE}"

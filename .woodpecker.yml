@@ -152,7 +152,7 @@ steps:
 
   # Step 7: Create Forgejo release with binary
   forgejo-release:
-    image: woodpeckerci/plugin-release:0.3.2@sha256:a045e18674319a2e3e534b5b674c100a0f01a9fc718dd03ab6732155b228e61b
+    image: woodpeckerci/plugin-release:0.3.3@sha256:26c8dec7b8b384d44b1c44cd0b041648feae80e0ba506da6f74a0a0b6ad05538
     settings:
       base_url: ${CI_FORGE_URL}
       api_key:

@@ -1,7 +1,7 @@
 steps:
   # Step 1: Run tests
   test:
-    image: golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+    image: golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
     commands:
       - go test -v ./...
     when:
@@ -12,7 +12,7 @@ steps:
 
   # Step 2: Security audit
   security:
-    image: golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+    image: golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
     commands:
       # Pinned instead of @latest so a compromised release can't silently run
       # in CI; the renovate comment keeps the pin current (customManagers in
@@ -71,7 +71,7 @@ steps:
 
   # Step 4: Build binary
   build:
-    image: golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+    image: golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
     commands:
       - apk add --no-cache git
       - go build -ldflags="-s -w -X main.version=${CI_COMMIT_TAG:-dev}" -trimpath -o repull ./cmd/repull

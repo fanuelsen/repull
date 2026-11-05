@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o repull ./cmd/repull
 
 # Stage 2: Runtime
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24.4@sha256:e2944c2947c8cabdd6b23a2ebcf8094a9f3d53ca9e0340edd065237ab74c18c0
 
 # Install CA certificates for HTTPS
 RUN apk --no-cache add ca-certificates

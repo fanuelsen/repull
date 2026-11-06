@@ -2,7 +2,7 @@
 # Base images pinned by digest: a compromised or re-pushed base tag would
 # end up inside (builder) or underneath (runtime) the shipped repull image.
 # Renovate keeps tag and digest current (pinDigests in renovate.json).
-FROM golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
+FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS builder
 
 WORKDIR /build
 
